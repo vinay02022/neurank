@@ -1,6 +1,6 @@
 # Neurank
 
-A GEO + SEO + AI content platform (Writesonic-class).
+A GEO + SEO + AI content platform .
 
 Track brand visibility across AI Search (ChatGPT, Gemini, Claude, Perplexity, Google AI Overviews), audit your site, generate fact-checked articles, and chat with multi-LLM marketing agents.
 
