@@ -187,6 +187,7 @@ type NumericQuotaKey = keyof Pick<
   | "articlesPerMonth"
   | "writingStyles"
   | "siteAuditsPerMonth"
+  | "siteAuditMaxPages"
   | "monthlyCredits"
 >;
 
