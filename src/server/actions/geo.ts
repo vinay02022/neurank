@@ -13,6 +13,7 @@ import {
 import { db } from "@/lib/db";
 import { assertInngestConfiguredInProd, inngest, inngestIsConfigured } from "@/lib/inngest";
 import { runForPrompt } from "@/lib/geo/engine";
+import { recomputeActionsForProject } from "@/lib/geo/action-generator";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { flattenZodError, promptTextSchema, shortTextSchema } from "@/lib/validation";
 
@@ -63,7 +64,20 @@ async function queuePromptRun(opts: { promptId: string; workspaceId: string }) {
     return { mode: "queued" as const };
   }
   try {
-    await runForPrompt(opts.promptId);
+    const summary = await runForPrompt(opts.promptId);
+    // In the inline path Inngest won't be around to fire the recompute
+    // event, so we run it synchronously. Best-effort: any failure here
+    // must never crash the triggering server action.
+    try {
+      const prompt = await db.trackedPrompt.findUnique({
+        where: { id: opts.promptId },
+        select: { projectId: true },
+      });
+      if (prompt) await recomputeActionsForProject(prompt.projectId);
+    } catch (err) {
+      console.error("[action.geo] inline recompute failed", err);
+    }
+    void summary;
     return { mode: "inline" as const };
   } catch (e) {
     console.error("[action.geo] inline run failed", e);
@@ -304,6 +318,11 @@ export async function runProjectAction(
       } catch (e) {
         console.error("[action.geo] inline runProject failed for", p.id, e);
       }
+    }
+    try {
+      await recomputeActionsForProject(project.id);
+    } catch (e) {
+      console.error("[action.geo] inline recompute failed", e);
     }
     await db.auditLog.create({
       data: {

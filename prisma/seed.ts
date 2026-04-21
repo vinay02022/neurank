@@ -381,6 +381,7 @@ async function main() {
     where: { projectId: project.id, status: "OPEN" },
   });
   if (actionsCount === 0) {
+    const firstTwo = prompts.slice(0, 2);
     await db.actionItem.createMany({
       data: [
         {
@@ -390,7 +391,12 @@ async function main() {
           title: "Publish: 'Asana vs Acme — 2026 comparison'",
           description:
             "Appears in 4 of 5 Gemini answers for comparison prompts. You're missing.",
-          payload: { promptIds: prompts.slice(0, 2).map((p) => p.id) },
+          // key: stable dedup identifier matches the live generator shape.
+          payload: {
+            key: firstTwo[0] ? `prompt:${firstTwo[0].id}` : "prompt:seed-comparison",
+            promptId: firstTwo[0]?.id ?? null,
+            promptText: firstTwo[0]?.text ?? "Asana vs Acme comparison",
+          },
         },
         {
           projectId: project.id,
@@ -399,7 +405,12 @@ async function main() {
           title: "Reach out to zapier.com (cites 3 competitors, not you)",
           description:
             "High-authority referrer with recurring citations to competitors.",
-          payload: { targetDomain: "zapier.com" },
+          payload: {
+            key: "domain:zapier.com",
+            domain: "zapier.com",
+            citingCompetitor: 3,
+            sampleUrls: ["https://zapier.com/blog/best-project-management-software/"],
+          },
         },
         {
           projectId: project.id,
@@ -407,7 +418,7 @@ async function main() {
           severity: "MEDIUM",
           title: "Add llms.txt to acme.com",
           description: "Improves discoverability by AI crawlers.",
-          payload: {},
+          payload: { key: "tech:llms-txt" },
         },
         {
           projectId: project.id,
@@ -415,15 +426,22 @@ async function main() {
           severity: "LOW",
           title: "Refresh: 'Remote team productivity' (2024)",
           description: "Slipping in Claude rankings, last updated 14 months ago.",
-          payload: {},
+          payload: {
+            key: firstTwo[1] ? `refresh:${firstTwo[1].id}` : "refresh:seed-remote",
+            promptId: firstTwo[1]?.id ?? null,
+          },
         },
         {
           projectId: project.id,
           kind: ActionKind.SOCIAL_ENGAGEMENT,
           severity: "LOW",
-          title: "Claim @acme on LinkedIn Newsroom",
-          description: "Acme is referenced without a linked source in 3 runs.",
-          payload: {},
+          title: "Respond on r/projectmanagement — 'best PM tools 2026'",
+          description:
+            "High-traffic Reddit thread asking which PM tools are worth it. Acme is not yet mentioned.",
+          payload: {
+            key: "social:reddit-best-pm-2026",
+            threadUrl: "https://www.reddit.com/r/projectmanagement/comments/seed-best-pm-tools",
+          },
         },
       ],
     });

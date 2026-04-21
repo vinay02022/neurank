@@ -1,8 +1,11 @@
 import "server-only";
 
 import { db } from "@/lib/db";
-import { inngest } from "@/lib/inngest";
+import { inngest, inngestIsConfigured } from "@/lib/inngest";
 import { runForPrompt } from "@/lib/geo/engine";
+import { recomputeActionsForProject } from "@/lib/geo/action-generator";
+
+import { geoActionsRecompute } from "./actions-recompute";
 
 /**
  * Inngest v4 moves the trigger into the options bag and uses a single
@@ -59,6 +62,29 @@ export const geoRunRequested = inngest.createFunction(
       });
     }
 
+    // Fan out a recompute event per affected project. We collect the
+    // distinct projectIds from the prompts we just ran; when the caller
+    // passed a projectId directly we reuse that.
+    const affectedProjectIds = await step.run("resolve-projects", async () => {
+      if (projectId) return [projectId];
+      if (promptIds.length === 0) return [] as string[];
+      const rows = await db.trackedPrompt.findMany({
+        where: { id: { in: promptIds } },
+        select: { projectId: true },
+      });
+      return Array.from(new Set(rows.map((r) => r.projectId)));
+    });
+
+    if (affectedProjectIds.length > 0) {
+      await step.sendEvent(
+        "actions-recompute",
+        affectedProjectIds.map((pid) => ({
+          name: "geo/actions.recompute",
+          data: { projectId: pid, workspaceId: event.data.workspaceId },
+        })),
+      );
+    }
+
     return { resolved: promptIds.length, results };
   },
 );
@@ -77,8 +103,23 @@ export const geoPromptAdded = inngest.createFunction(
     retries: 2,
   },
   async ({ event, step }: { event: GeoPromptAddedEvent; step: InngestStep }) => {
-    const { promptId } = event.data;
+    const { promptId, workspaceId } = event.data;
     const summary = await step.run("run-prompt", async () => runForPrompt(promptId));
+
+    const projectId = await step.run("resolve-project", async () => {
+      const row = await db.trackedPrompt.findUnique({
+        where: { id: promptId },
+        select: { projectId: true },
+      });
+      return row?.projectId ?? null;
+    });
+    if (projectId) {
+      await step.sendEvent("actions-recompute", {
+        name: "geo/actions.recompute",
+        data: { projectId, workspaceId },
+      });
+    }
+
     return {
       promptId,
       platforms: summary.runs.length,
@@ -139,7 +180,12 @@ export const geoDailyCron = inngest.createFunction(
   },
 );
 
-export const geoFunctions = [geoRunRequested, geoPromptAdded, geoDailyCron];
+export const geoFunctions = [
+  geoRunRequested,
+  geoPromptAdded,
+  geoDailyCron,
+  geoActionsRecompute,
+];
 
 // Narrow subset of the step helper surface we actually use. Inngest's
 // inferred step type is very wide and cannot be re-exported directly
