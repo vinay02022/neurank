@@ -1,12 +1,13 @@
 import { serve } from "inngest/next";
+
 import { inngest } from "@/lib/inngest";
+import { geoFunctions } from "@/server/inngest/geo-run";
 
 /**
- * Inngest endpoint.
- * Functions are registered empty in phase 00; later phases add GEO runs,
- * audits, article generation, etc.
+ * Inngest endpoint. Functions registered here are discovered by the
+ * Inngest dev server and by the production Inngest cloud during deploy.
  */
 export const { GET, POST, PUT } = serve({
   client: inngest,
-  functions: [],
+  functions: [...geoFunctions],
 });
