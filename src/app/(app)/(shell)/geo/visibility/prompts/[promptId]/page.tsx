@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { notFound, redirect } from "next/navigation";
+import { notFound } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -21,25 +21,30 @@ interface PageProps {
 }
 
 export async function generateMetadata({ params }: PageProps) {
-  const { promptId } = await params;
-  const prompt = await db.trackedPrompt.findUnique({
-    where: { id: promptId },
-    select: { text: true },
-  });
-  return { title: prompt ? `${prompt.text.slice(0, 60)} — Visibility` : "Visibility" };
+  try {
+    const { workspace } = await getCurrentMembership();
+    const { promptId } = await params;
+    const prompt = await db.trackedPrompt.findFirst({
+      where: { id: promptId, project: { workspaceId: workspace.id } },
+      select: { text: true },
+    });
+    return { title: prompt ? `${prompt.text.slice(0, 60)} — Visibility` : "Visibility" };
+  } catch {
+    return { title: "Visibility" };
+  }
 }
 
 export default async function PromptDetailPage({ params }: PageProps) {
   const membership = await getCurrentMembership();
   const { promptId } = await params;
 
-  const detail = await getPromptDetail(promptId, { windowDays: 30 });
+  const detail = await getPromptDetail(promptId, {
+    windowDays: 30,
+    workspaceId: membership.workspace.id,
+  });
+  // 404 covers both non-existent IDs and IDs that belong to a different
+  // workspace — we deliberately do NOT leak existence via a redirect.
   if (!detail) notFound();
-
-  // Workspace scoping — make sure this prompt belongs to the current workspace.
-  if (detail.project.workspaceId !== membership.workspace.id) {
-    redirect("/geo/visibility");
-  }
 
   const { prompt, project, platforms, sentimentTimeline, competitorSeries } = detail;
 

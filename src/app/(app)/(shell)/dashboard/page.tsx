@@ -22,6 +22,7 @@ export default async function DashboardPage() {
   const data = await getDashboardData(project.id, {
     brandName: project.brandName,
     windowDays: 30,
+    workspaceId: workspace.id,
   });
 
   const firstName = user.name?.split(" ")[0];

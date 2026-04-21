@@ -36,6 +36,13 @@ export interface VisibilityListFilters {
   search?: string;
   intent?: PromptIntent;
   windowDays?: number;
+  /**
+   * Defense-in-depth: when provided, the query is additionally scoped to
+   * this workspaceId via the project relation. Callers that already
+   * verified project ownership can omit it, but passing it prevents any
+   * cross-tenant leak if a future caller forgets the check.
+   */
+  workspaceId?: string;
 }
 
 export async function getVisibilityList(
@@ -48,6 +55,9 @@ export async function getVisibilityList(
   const prompts = await db.trackedPrompt.findMany({
     where: {
       projectId,
+      ...(filters.workspaceId
+        ? { project: { workspaceId: filters.workspaceId } }
+        : {}),
       ...(filters.intent ? { intent: filters.intent } : {}),
       ...(filters.search?.trim()
         ? { text: { contains: filters.search.trim(), mode: "insensitive" } }
@@ -227,13 +237,20 @@ export interface PromptDetail {
 
 export async function getPromptDetail(
   promptId: string,
-  opts: { windowDays?: number } = {},
+  opts: { windowDays?: number; workspaceId?: string } = {},
 ): Promise<PromptDetail | null> {
   const windowDays = opts.windowDays ?? 30;
   const since = daysAgo(windowDays);
 
-  const prompt = await db.trackedPrompt.findUnique({
-    where: { id: promptId },
+  // Workspace-scoped lookup — we use findFirst (not findUnique) because
+  // Prisma cannot express a compound `id + relation` constraint via
+  // findUnique. This is the single place cross-tenant isolation is
+  // enforced for the drill-down page.
+  const prompt = await db.trackedPrompt.findFirst({
+    where: {
+      id: promptId,
+      ...(opts.workspaceId ? { project: { workspaceId: opts.workspaceId } } : {}),
+    },
     include: {
       project: {
         select: {

@@ -24,7 +24,7 @@ interface PageProps {
 }
 
 export default async function VisibilityPage({ searchParams }: PageProps) {
-  await getCurrentMembership();
+  const { workspace } = await getCurrentMembership();
   const project = await getCurrentProject();
   if (!project) redirect("/onboarding");
 
@@ -39,6 +39,7 @@ export default async function VisibilityPage({ searchParams }: PageProps) {
     platforms: platforms.length ? platforms : undefined,
     windowDays,
     intent: intent === "ALL" ? undefined : intent,
+    workspaceId: workspace.id,
   });
 
   const totalPrompts = rows.length;
