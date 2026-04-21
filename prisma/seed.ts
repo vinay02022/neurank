@@ -1,13 +1,36 @@
 /**
- * Seed a demo workspace so the UI has real data to render
- * before Clerk is wired up. Safe to re-run (uses upsert).
+ * Seed a demo workspace so the UI has real data to render before
+ * Clerk is wired up. Safe to re-run (uses upsert). Generates 30
+ * days of visibility runs, competitor mentions, AI traffic events
+ * and action items so the dashboard looks alive.
  *
  * Run: pnpm db:seed
  */
 
-import { PrismaClient, AIPlatform, Sentiment, ActionKind } from "@prisma/client";
+import {
+  PrismaClient,
+  AIPlatform,
+  Sentiment,
+  ActionKind,
+} from "@prisma/client";
 
 const db = new PrismaClient();
+
+const DAYS = 30;
+
+/** Deterministic pseudo-random so reseeding yields similar-looking charts. */
+function hashSeed(input: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < input.length; i += 1) {
+    h ^= input.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0) / 0xffffffff;
+}
+
+function rand(seed: string): number {
+  return hashSeed(seed);
+}
 
 async function main() {
   console.log("Seeding Neurank demo workspace…");
@@ -59,12 +82,14 @@ async function main() {
     { name: "Notion", domain: "notion.so" },
   ];
 
+  const competitors: { id: string; name: string; domain: string }[] = [];
   for (const c of competitorData) {
-    await db.competitor.upsert({
+    const competitor = await db.competitor.upsert({
       where: { projectId_domain: { projectId: project.id, domain: c.domain } },
       update: {},
       create: { projectId: project.id, name: c.name, domain: c.domain, aliases: [] },
     });
+    competitors.push({ id: competitor.id, name: c.name, domain: c.domain });
   }
 
   const promptTexts = [
@@ -75,94 +100,178 @@ async function main() {
     "Project management software for startups",
   ];
 
-  const prompts = [];
+  const prompts: { id: string; text: string }[] = [];
   for (const text of promptTexts) {
     const p = await db.trackedPrompt.findFirst({
       where: { projectId: project.id, text },
     });
     if (p) {
-      prompts.push(p);
+      prompts.push({ id: p.id, text });
     } else {
-      prompts.push(
-        await db.trackedPrompt.create({
-          data: { projectId: project.id, text, intent: "INFORMATIONAL" },
-        }),
-      );
+      const created = await db.trackedPrompt.create({
+        data: { projectId: project.id, text, intent: "INFORMATIONAL" },
+      });
+      prompts.push({ id: created.id, text });
     }
   }
 
-  const platforms: AIPlatform[] = ["CHATGPT", "GEMINI", "CLAUDE", "PERPLEXITY", "GOOGLE_AIO"];
+  const platforms: AIPlatform[] = [
+    "CHATGPT",
+    "GEMINI",
+    "CLAUDE",
+    "PERPLEXITY",
+    "GOOGLE_AIO",
+  ];
+
+  // Trend target per platform: brand mention rate that gently improves
+  // over the 30-day window so the chart shows a positive story.
+  const platformBase: Record<AIPlatform, number> = {
+    CHATGPT: 0.78,
+    GEMINI: 0.55,
+    CLAUDE: 0.68,
+    PERPLEXITY: 0.62,
+    GOOGLE_AIO: 0.48,
+    GOOGLE_AI_MODE: 0,
+    COPILOT: 0,
+    GROK: 0,
+    META_AI: 0,
+    DEEPSEEK: 0,
+  };
+
+  // Clear any previously-seeded runs so reseeding updates the whole window.
+  await db.mention.deleteMany({
+    where: {
+      visibilityRun: {
+        prompt: { projectId: project.id },
+        modelUsed: "seed",
+      },
+    },
+  });
+  await db.visibilityRun.deleteMany({
+    where: {
+      prompt: { projectId: project.id },
+      modelUsed: "seed",
+    },
+  });
+
   const today = new Date();
   today.setUTCHours(0, 0, 0, 0);
 
-  for (const prompt of prompts) {
-    for (const platform of platforms) {
-      const mentioned = Math.random() > 0.3;
-      const position = mentioned ? Math.floor(Math.random() * 5) + 1 : null;
-      const sentiment: Sentiment = mentioned
-        ? Math.random() > 0.2
-          ? "POSITIVE"
-          : "NEUTRAL"
-        : "NEUTRAL";
+  let runsCreated = 0;
+  for (let d = DAYS - 1; d >= 0; d -= 1) {
+    const runDate = new Date(today);
+    runDate.setUTCDate(today.getUTCDate() - d);
+    const trendBias = (DAYS - 1 - d) / (DAYS - 1); // 0..1 across the window
 
-      const run = await db.visibilityRun.upsert({
-        where: {
-          trackedPromptId_platform_runDate: {
+    for (const prompt of prompts) {
+      for (const platform of platforms) {
+        const base = platformBase[platform];
+        const target = Math.min(0.94, base + trendBias * 0.12);
+        const jitter = (rand(`${prompt.id}:${platform}:${d}`) - 0.5) * 0.18;
+        const mentioned = rand(`${prompt.id}:${platform}:${d}:m`) < target + jitter;
+        const position = mentioned ? Math.floor(rand(`${prompt.id}:${platform}:${d}:p`) * 4) + 1 : null;
+        const sentiment: Sentiment = mentioned
+          ? rand(`${prompt.id}:${platform}:${d}:s`) < 0.82
+            ? "POSITIVE"
+            : "NEUTRAL"
+          : "NEUTRAL";
+
+        const run = await db.visibilityRun.create({
+          data: {
             trackedPromptId: prompt.id,
             platform,
-            runDate: today,
+            runDate,
+            rawAnswer: `Seeded answer for "${prompt.text}" on ${platform}. ${
+              mentioned
+                ? `Acme is recommended${position ? ` at position ${position}` : ""}.`
+                : "Acme was not mentioned."
+            }`,
+            modelUsed: "seed",
+            tokensUsed: 400,
+            brandMentioned: mentioned,
+            brandPosition: position ?? undefined,
+            sentiment,
           },
-        },
-        update: {},
-        create: {
-          trackedPromptId: prompt.id,
-          platform,
-          runDate: today,
-          rawAnswer: `Seeded answer for "${prompt.text}" on ${platform}. ${
-            mentioned
-              ? `Acme is recommended${position ? ` at position ${position}` : ""}.`
-              : "Acme was not mentioned."
-          }`,
-          modelUsed: "seed",
-          tokensUsed: 400,
-          brandMentioned: mentioned,
-          brandPosition: position ?? undefined,
-          sentiment,
-        },
-      });
+        });
+        runsCreated += 1;
 
-      if (mentioned) {
-        await db.mention.create({
-          data: {
+        const mentions: {
+          visibilityRunId: string;
+          competitorId?: string;
+          name: string;
+          position: number;
+          sentiment: Sentiment;
+          context: string;
+        }[] = [];
+
+        if (mentioned) {
+          mentions.push({
             visibilityRunId: run.id,
             name: "Acme",
             position: position ?? 1,
             sentiment,
             context: `Seeded mention of Acme in ${platform} answer.`,
-          },
-        });
-      }
+          });
+        }
 
-      for (const comp of competitorData.slice(0, 3)) {
-        const compPos = Math.floor(Math.random() * 5) + 1;
-        const competitor = await db.competitor.findFirst({
-          where: { projectId: project.id, domain: comp.domain },
-        });
-        await db.mention.create({
-          data: {
+        // 2-3 competitor mentions per run with rotating cast.
+        const compCount = rand(`${prompt.id}:${platform}:${d}:cc`) > 0.45 ? 3 : 2;
+        for (let i = 0; i < compCount; i += 1) {
+          const comp = competitors[(i + d) % competitors.length]!;
+          const compPos = Math.floor(rand(`${run.id}:${comp.domain}:${i}`) * 4) + 1;
+          mentions.push({
             visibilityRunId: run.id,
-            competitorId: competitor?.id,
+            competitorId: comp.id,
             name: comp.name,
             position: compPos,
             sentiment: "POSITIVE",
             context: `Competitor mention from seed.`,
-          },
-        });
+          });
+        }
+
+        await db.mention.createMany({ data: mentions });
       }
     }
   }
 
-  const actionsCount = await db.actionItem.count({ where: { projectId: project.id } });
+  // 14 days of AI-crawler / referrer events for the KPI card.
+  await db.aITrafficEvent.deleteMany({ where: { projectId: project.id } });
+  const bots = [
+    { bot: "GPT_BOT" as const, ua: "Mozilla/5.0 (compatible; GPTBot/1.2)" },
+    { bot: "PERPLEXITY_BOT" as const, ua: "Mozilla/5.0 (compatible; PerplexityBot)" },
+    { bot: "CLAUDE_BOT" as const, ua: "Mozilla/5.0 (compatible; ClaudeBot/1.0)" },
+    { bot: "GOOGLE_EXTENDED" as const, ua: "Mozilla/5.0 (compatible; Google-Extended)" },
+  ];
+  const trafficInputs: {
+    projectId: string;
+    bot: (typeof bots)[number]["bot"];
+    url: string;
+    userAgent: string;
+    occurredAt: Date;
+  }[] = [];
+  for (let d = 13; d >= 0; d -= 1) {
+    const day = new Date(today);
+    day.setUTCDate(today.getUTCDate() - d);
+    for (const { bot, ua } of bots) {
+      const events = Math.floor(12 + rand(`${bot}:${d}:traffic`) * 25);
+      for (let i = 0; i < events; i += 1) {
+        trafficInputs.push({
+          projectId: project.id,
+          bot,
+          url: i % 2 === 0 ? "https://acme.com/pricing" : "https://acme.com/features",
+          userAgent: ua,
+          occurredAt: new Date(day.getTime() + i * 60_000),
+        });
+      }
+    }
+  }
+  if (trafficInputs.length) {
+    await db.aITrafficEvent.createMany({ data: trafficInputs });
+  }
+
+  const actionsCount = await db.actionItem.count({
+    where: { projectId: project.id, status: "OPEN" },
+  });
   if (actionsCount === 0) {
     await db.actionItem.createMany({
       data: [
@@ -180,7 +289,8 @@ async function main() {
           kind: ActionKind.CITATION_OPPORTUNITY,
           severity: "MEDIUM",
           title: "Reach out to zapier.com (cites 3 competitors, not you)",
-          description: "High-authority referrer with recurring citations to competitors.",
+          description:
+            "High-authority referrer with recurring citations to competitors.",
           payload: { targetDomain: "zapier.com" },
         },
         {
@@ -191,11 +301,29 @@ async function main() {
           description: "Improves discoverability by AI crawlers.",
           payload: {},
         },
+        {
+          projectId: project.id,
+          kind: ActionKind.CONTENT_REFRESH,
+          severity: "LOW",
+          title: "Refresh: 'Remote team productivity' (2024)",
+          description: "Slipping in Claude rankings, last updated 14 months ago.",
+          payload: {},
+        },
+        {
+          projectId: project.id,
+          kind: ActionKind.SOCIAL_ENGAGEMENT,
+          severity: "LOW",
+          title: "Claim @acme on LinkedIn Newsroom",
+          description: "Acme is referenced without a linked source in 3 runs.",
+          payload: {},
+        },
       ],
     });
   }
 
-  console.log(`✓ Seeded workspace ${workspace.slug}`);
+  console.log(
+    `✓ Seeded workspace ${workspace.slug} with ${runsCreated} visibility runs over ${DAYS} days.`,
+  );
 }
 
 main()
