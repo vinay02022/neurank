@@ -26,6 +26,10 @@ type FormState = {
   prompts: string[];
 };
 
+// TODO(phase-03): replace this hard-coded list with `ai.router.generate`
+// so onboarding prompts are derived from the project's brand, domain,
+// and competitor set via the provider-agnostic AI router. Keep this
+// fallback so the UI still works offline / when the router is down.
 const SUGGESTED_PROMPTS = (brand: string) => [
   `Best alternatives to ${brand}`,
   `${brand} vs competitors`,

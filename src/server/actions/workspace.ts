@@ -15,6 +15,7 @@ import {
   setCurrentProject,
   switchWorkspace as switchWs,
 } from "@/lib/auth";
+import { checkRateLimit } from "@/lib/rate-limit";
 import {
   brandNameSchema,
   domainSchema,
@@ -42,6 +43,21 @@ function fail(e: unknown): ActionResult<never> {
   return { ok: false, error: "Something went wrong", code: "SERVER" };
 }
 
+/**
+ * Enforce a rate limit on a mutating server action, keyed by the
+ * authenticated user id. Throws ValidationError so existing error
+ * plumbing returns a typed { ok:false } to the client.
+ */
+async function enforceActionRateLimit(
+  bucket: "onboarding" | "api:default",
+  userId: string,
+): Promise<void> {
+  const rl = await checkRateLimit(bucket, userId);
+  if (!rl.success) {
+    throw new ValidationError("Too many requests — please slow down and try again.");
+  }
+}
+
 // ------------------------------------------------------------------
 // createWorkspaceAction
 // ------------------------------------------------------------------
@@ -56,6 +72,7 @@ export async function createWorkspaceAction(
 ): Promise<ActionResult<{ id: string; slug: string }>> {
   try {
     const user = await getCurrentUser();
+    await enforceActionRateLimit("api:default", user.id);
     const { name, slug } = createWorkspaceSchema.parse(input);
 
     const taken = await db.workspace.findUnique({ where: { slug } });
@@ -105,6 +122,7 @@ export async function createProjectAction(
 ): Promise<ActionResult<{ id: string }>> {
   try {
     const { membership, user, workspace } = await getCurrentMembership();
+    await enforceActionRateLimit("api:default", user.id);
     if (membership.role === "MEMBER") {
       throw new ForbiddenError("Admins and owners can create projects");
     }
@@ -169,6 +187,7 @@ export async function addCompetitorAction(
 ): Promise<ActionResult<{ id: string }>> {
   try {
     const { user, workspace } = await getCurrentMembership();
+    await enforceActionRateLimit("api:default", user.id);
     const parsed = addCompetitorSchema.parse(input);
 
     const project = await db.project.findFirst({
@@ -218,6 +237,7 @@ export async function addPromptAction(
 ): Promise<ActionResult<{ id: string }>> {
   try {
     const { user, workspace } = await getCurrentMembership();
+    await enforceActionRateLimit("api:default", user.id);
     const parsed = addPromptSchema.parse(input);
 
     const project = await db.project.findFirst({
@@ -321,6 +341,7 @@ export async function completeOnboardingAction(
 ): Promise<ActionResult<{ projectId: string }>> {
   try {
     const { user, workspace, membership } = await getCurrentMembership();
+    await enforceActionRateLimit("onboarding", user.id);
     if (membership.role === "MEMBER") {
       throw new ForbiddenError("Only owners or admins can complete onboarding");
     }

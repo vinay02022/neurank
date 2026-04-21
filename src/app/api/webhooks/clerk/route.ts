@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { headers } from "next/headers";
 import { Webhook } from "svix";
 import type { WebhookEvent } from "@clerk/nextjs/server";
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 
 import { db } from "@/lib/db";
 import { checkRateLimit } from "@/lib/rate-limit";
@@ -176,14 +176,33 @@ async function onUserUpdated(u: ClerkUser) {
   const user = await db.user.findUnique({ where: { clerkUserId: u.id } });
   if (!user) return onUserCreated(u);
 
-  await db.user.update({
-    where: { id: user.id },
-    data: {
-      email: primaryEmail(u),
-      name: displayName(u),
-      avatarUrl: u.image_url ?? null,
-    },
-  });
+  const nextEmail = primaryEmail(u);
+  const nextName = displayName(u);
+  const nextAvatar = u.image_url ?? null;
+
+  try {
+    await db.user.update({
+      where: { id: user.id },
+      data: { email: nextEmail, name: nextName, avatarUrl: nextAvatar },
+    });
+  } catch (e) {
+    // P2002 = unique constraint violation. Most likely the new email
+    // collides with a tombstoned / soft-deleted record. Fall back to
+    // updating everything *except* the email so we don't wedge the
+    // webhook loop. Surface non-P2002 errors to the caller.
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
+      console.warn(
+        "[clerk-webhook] user.updated email collision, keeping existing email",
+        { userId: user.id, target: (e.meta as { target?: string[] } | undefined)?.target },
+      );
+      await db.user.update({
+        where: { id: user.id },
+        data: { name: nextName, avatarUrl: nextAvatar },
+      });
+      return;
+    }
+    throw e;
+  }
 }
 
 async function onUserDeleted(u: { id: string; deleted?: boolean }) {
