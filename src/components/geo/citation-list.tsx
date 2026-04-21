@@ -4,7 +4,7 @@ import * as React from "react";
 import { ExternalLink } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
-import { cn } from "@/lib/utils";
+import { cn, safeHttpUrl } from "@/lib/utils";
 
 export interface CitationGroupItem {
   url: string;
@@ -39,24 +39,39 @@ export function CitationList({ groups, className }: { groups: CitationGroup[]; c
             <Badge variant="outline">{g.items.length} cit.</Badge>
           </div>
           <ul className="space-y-1.5">
-            {g.items.map((c) => (
-              <li key={c.url}>
-                <a
-                  href={c.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="group flex items-start gap-2 rounded px-1.5 py-1 text-xs text-muted-foreground transition hover:bg-muted/30 hover:text-foreground"
-                >
-                  <span className="font-mono text-[10px] text-muted-foreground/80">
-                    {String(c.position).padStart(2, "0")}
-                  </span>
-                  <span className="line-clamp-2 flex-1">
-                    {c.title || c.url}
-                  </span>
-                  <ExternalLink className="mt-0.5 size-3 shrink-0 opacity-0 transition group-hover:opacity-100" />
-                </a>
-              </li>
-            ))}
+            {g.items.map((c) => {
+              // Defense-in-depth: the server-side parser already rejects
+              // non-http(s) URLs, but render as inert text if one ever
+              // slips through so there is no path to a rendered
+              // `javascript:` href.
+              const safe = safeHttpUrl(c.url);
+              const label = c.title || c.url;
+              return (
+                <li key={c.url}>
+                  {safe ? (
+                    <a
+                      href={safe}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="group flex items-start gap-2 rounded px-1.5 py-1 text-xs text-muted-foreground transition hover:bg-muted/30 hover:text-foreground"
+                    >
+                      <span className="font-mono text-[10px] text-muted-foreground/80">
+                        {String(c.position).padStart(2, "0")}
+                      </span>
+                      <span className="line-clamp-2 flex-1">{label}</span>
+                      <ExternalLink className="mt-0.5 size-3 shrink-0 opacity-0 transition group-hover:opacity-100" />
+                    </a>
+                  ) : (
+                    <div className="flex items-start gap-2 rounded px-1.5 py-1 text-xs text-muted-foreground">
+                      <span className="font-mono text-[10px] text-muted-foreground/80">
+                        {String(c.position).padStart(2, "0")}
+                      </span>
+                      <span className="line-clamp-2 flex-1">{label}</span>
+                    </div>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         </div>
       ))}

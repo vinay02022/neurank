@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
+import { planQuota } from "@/config/plans";
 import {
   ForbiddenError,
   UnauthorizedError,
@@ -10,7 +11,7 @@ import {
   getCurrentMembership,
 } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { inngest } from "@/lib/inngest";
+import { assertInngestConfiguredInProd, inngest, inngestIsConfigured } from "@/lib/inngest";
 import { runForPrompt } from "@/lib/geo/engine";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { flattenZodError, promptTextSchema, shortTextSchema } from "@/lib/validation";
@@ -48,15 +49,19 @@ async function enforceRateLimit(userId: string): Promise<void> {
 // ------------------------------------------------------------------
 
 async function queuePromptRun(opts: { promptId: string; workspaceId: string }) {
-  if (process.env.INNGEST_EVENT_KEY) {
+  // In production, require Inngest to be configured. Running 5 LLM calls
+  // inline inside a Server Action is a reliability bomb (Vercel serverless
+  // functions have a 60s hard limit and each provider call is allowed
+  // 30s). The synchronous fallback is a dev convenience only.
+  assertInngestConfiguredInProd();
+
+  if (inngestIsConfigured()) {
     await inngest.send({
       name: "geo/run.requested",
       data: { promptId: opts.promptId, workspaceId: opts.workspaceId },
     });
     return { mode: "queued" as const };
   }
-  // Dev / mock mode: run synchronously so the UI has data on first load.
-  // This keeps the whole pipeline exercisable without an Inngest dev server.
   try {
     await runForPrompt(opts.promptId);
     return { mode: "inline" as const };
@@ -102,6 +107,31 @@ export async function addPromptsAction(
     const existingByText = new Map(existing.map((e) => [e.text, e.id]));
 
     const toCreate = uniqueTexts.filter((t) => !existingByText.has(t));
+
+    // Enforce per-plan prompt cap, counted across the whole workspace
+    // (a workspace with multiple projects shares one pool).
+    if (toCreate.length) {
+      const promptQuota = planQuota(workspace.plan, "promptsTracked");
+      if (promptQuota <= 0) {
+        throw new ForbiddenError(
+          `Your ${workspace.plan} plan does not include GEO prompt tracking. Upgrade to STARTER or higher.`,
+        );
+      }
+      const currentCount = await db.trackedPrompt.count({
+        where: { project: { workspaceId: workspace.id } },
+      });
+      const remaining = promptQuota - currentCount;
+      if (remaining <= 0) {
+        throw new ForbiddenError(
+          `Your ${workspace.plan} plan allows up to ${promptQuota} tracked prompts. Remove some or upgrade to add more.`,
+        );
+      }
+      if (toCreate.length > remaining) {
+        throw new ForbiddenError(
+          `Only ${remaining} more prompt${remaining === 1 ? "" : "s"} can be added on your ${workspace.plan} plan (${toCreate.length} submitted).`,
+        );
+      }
+    }
 
     let createdIds: string[] = [];
     if (toCreate.length) {
@@ -252,7 +282,10 @@ export async function runProjectAction(
     });
     if (!project) throw new ForbiddenError("Project not found in this workspace");
 
-    if (process.env.INNGEST_EVENT_KEY) {
+    // Same fail-closed rule as queuePromptRun.
+    assertInngestConfiguredInProd();
+
+    if (inngestIsConfigured()) {
       await inngest.send({
         name: "geo/run.requested",
         data: { projectId: project.id, workspaceId: workspace.id },

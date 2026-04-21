@@ -102,22 +102,40 @@ export const geoDailyCron = inngest.createFunction(
     triggers: [{ cron: "0 4 * * *" }],
   },
   async ({ step }: { step: InngestStep }) => {
+    // Only fan out to projects that (a) belong to a plan that allows
+    // GEO tracking and (b) actually have at least one active prompt.
+    // FREE / INDIVIDUAL plans either have 0 enabled platforms or 0
+    // prompt budget and would be an expensive no-op at fleet scale.
     const projects = await step.run("list-projects", async () =>
       db.project.findMany({
+        where: {
+          workspace: { plan: { in: ["STARTER", "BASIC", "GROWTH", "ENTERPRISE"] } },
+          trackedPrompts: { some: { active: true } },
+        },
         select: { id: true, workspaceId: true },
       }),
     );
 
-    await Promise.all(
-      projects.map((p: { id: string; workspaceId: string }) =>
-        step.sendEvent(`run-${p.id}`, {
+    // Batch the fan-out in chunks so we issue a bounded number of
+    // `step.sendEvent` calls rather than `Promise.all` over N projects.
+    // Inngest accepts an array of events per call; 500 is well under
+    // their per-request payload limit.
+    const BATCH = 500;
+    let dispatched = 0;
+    for (let i = 0; i < projects.length; i += BATCH) {
+      const slice = projects.slice(i, i + BATCH);
+      const batchId = `dispatch-${Math.floor(i / BATCH)}`;
+      await step.sendEvent(
+        batchId,
+        slice.map((p: { id: string; workspaceId: string }) => ({
           name: "geo/run.requested",
           data: { projectId: p.id, workspaceId: p.workspaceId },
-        }),
-      ),
-    );
+        })),
+      );
+      dispatched += slice.length;
+    }
 
-    return { dispatched: projects.length };
+    return { dispatched };
   },
 );
 
@@ -128,5 +146,10 @@ export const geoFunctions = [geoRunRequested, geoPromptAdded, geoDailyCron];
 // from this file without pulling in many internal generics.
 interface InngestStep {
   run<T>(id: string, fn: () => Promise<T> | T): Promise<T>;
-  sendEvent(id: string, event: { name: string; data: Record<string, unknown> }): Promise<unknown>;
+  sendEvent(
+    id: string,
+    event:
+      | { name: string; data: Record<string, unknown> }
+      | Array<{ name: string; data: Record<string, unknown> }>,
+  ): Promise<unknown>;
 }

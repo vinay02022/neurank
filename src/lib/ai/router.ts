@@ -8,6 +8,25 @@ import { db } from "@/lib/db";
 
 import { isMockMode, resolveModel } from "./providers";
 
+/**
+ * Raised when a workspace does not have enough credits to cover an LLM
+ * task. Callers should catch this specifically so the UI can surface
+ * an "upgrade / top up" affordance instead of a generic 500.
+ */
+export class InsufficientCreditsError extends Error {
+  readonly code = "INSUFFICIENT_CREDITS";
+  constructor(
+    public readonly workspaceId: string,
+    public readonly required: number,
+    public readonly available: number,
+  ) {
+    super(
+      `Workspace ${workspaceId} has ${available} credits but ${required} are required.`,
+    );
+    this.name = "InsufficientCreditsError";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Public surface
 // ---------------------------------------------------------------------------
@@ -57,6 +76,11 @@ export async function generate<T = string>(
   const bindings = LLM_MAP[args.task];
   if (!bindings?.length) throw new Error(`[router] no bindings for task ${args.task}`);
 
+  // Pre-flight credit check — we do NOT want to burn a provider call
+  // (and real tokens) only to discover the workspace is out of credits.
+  // Mock mode is free so we skip the check there.
+  if (!args.skipDebit) await assertSufficientCredits(args.workspaceId, args.task);
+
   let lastError: unknown;
   for (const binding of bindings) {
     try {
@@ -67,6 +91,10 @@ export async function generate<T = string>(
     } catch (err) {
       lastError = err;
       await recordEvent({ args, binding, error: err });
+      // If credit debit raced with another concurrent call and the
+      // balance went negative, surface the typed error immediately
+      // rather than burning another fallback binding.
+      if (err instanceof InsufficientCreditsError) throw err;
     }
   }
   throw lastError;
@@ -97,7 +125,7 @@ async function tryBinding<T>(
   while (attempt <= DEFAULT_RETRIES) {
     try {
       if (args.schema) {
-        const r = await withTimeout(
+        const r = await withAbortableTimeout((signal) =>
           generateObject({
             model,
             system: args.system,
@@ -105,6 +133,7 @@ async function tryBinding<T>(
             schema: args.schema as z.ZodType<T>,
             temperature: args.temperature ?? 0.2,
             maxOutputTokens: args.maxTokens ?? 1024,
+            abortSignal: signal,
           }),
         );
         const latencyMs = Date.now() - started;
@@ -124,13 +153,14 @@ async function tryBinding<T>(
         };
       }
 
-      const r = await withTimeout(
+      const r = await withAbortableTimeout((signal) =>
         generateText({
           model,
           system: args.system,
           prompt: args.prompt,
           temperature: args.temperature ?? 0.2,
           maxOutputTokens: args.maxTokens ?? 1024,
+          abortSignal: signal,
         }),
       );
       const latencyMs = Date.now() - started;
@@ -157,20 +187,26 @@ async function tryBinding<T>(
   throw lastError;
 }
 
-function withTimeout<T>(p: Promise<T>, ms = DEFAULT_TIMEOUT_MS): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error("[router] LLM timeout")), ms);
-    p.then(
-      (v) => {
-        clearTimeout(t);
-        resolve(v);
-      },
-      (e) => {
-        clearTimeout(t);
-        reject(e);
-      },
-    );
-  });
+/**
+ * Wraps a provider call in a timeout AND signals the provider to abort
+ * its underlying fetch on timeout. Without the `abortSignal` forwarded
+ * into the AI SDK, a timed-out call would still burn tokens + compute
+ * in the background while we return an error to the user.
+ */
+function withAbortableTimeout<T>(
+  fn: (signal: AbortSignal) => Promise<T>,
+  ms = DEFAULT_TIMEOUT_MS,
+): Promise<T> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), ms);
+  return fn(controller.signal)
+    .catch((err) => {
+      if (controller.signal.aborted) {
+        throw new Error("[router] LLM timeout");
+      }
+      throw err;
+    })
+    .finally(() => clearTimeout(timeout));
 }
 
 function sleep(ms: number) {
@@ -288,14 +324,52 @@ async function recordEvent(opts: {
   }
 }
 
+/**
+ * Pre-flight check: verify the workspace has enough credits before we
+ * spend any real money. This is an optimistic check only — the atomic
+ * guard in {@link debit} is what actually prevents races between
+ * concurrent callers.
+ */
+async function assertSufficientCredits(workspaceId: string, task: LLMTask): Promise<void> {
+  const cost = CREDIT_COST[task];
+  if (!cost) return;
+  const ws = await db.workspace.findUnique({
+    where: { id: workspaceId },
+    select: { creditBalance: true, plan: true },
+  });
+  if (!ws) {
+    throw new Error(`[router] workspace ${workspaceId} not found`);
+  }
+  // Enterprise is treated as unlimited (plan quota already covers this
+  // upstream; we keep the balance concept for usage reporting only).
+  if (ws.plan === "ENTERPRISE") return;
+  if (ws.creditBalance < cost) {
+    throw new InsufficientCreditsError(workspaceId, cost, ws.creditBalance);
+  }
+}
+
 async function debit(workspaceId: string, task: LLMTask): Promise<void> {
   const cost = CREDIT_COST[task];
   if (!cost) return;
   try {
     await db.$transaction(async (tx) => {
-      const ws = await tx.workspace.update({
-        where: { id: workspaceId },
+      // Atomic guarded decrement — only debits if the balance covers
+      // the cost. Concurrent callers racing on the same workspace
+      // will serialise through this row-level update and whichever
+      // one hits zero first wins; the loser surfaces a typed error.
+      const result = await tx.workspace.updateMany({
+        where: { id: workspaceId, creditBalance: { gte: cost } },
         data: { creditBalance: { decrement: cost } },
+      });
+      if (result.count === 0) {
+        const ws = await tx.workspace.findUnique({
+          where: { id: workspaceId },
+          select: { creditBalance: true },
+        });
+        throw new InsufficientCreditsError(workspaceId, cost, ws?.creditBalance ?? 0);
+      }
+      const updated = await tx.workspace.findUnique({
+        where: { id: workspaceId },
         select: { creditBalance: true },
       });
       await tx.creditLedger.create({
@@ -303,11 +377,12 @@ async function debit(workspaceId: string, task: LLMTask): Promise<void> {
           workspaceId,
           delta: -cost,
           reason: `llm:${task}`,
-          balanceAfter: ws.creditBalance,
+          balanceAfter: updated?.creditBalance ?? 0,
         },
       });
     });
   } catch (e) {
+    if (e instanceof InsufficientCreditsError) throw e;
     console.error("[router] debit failed", e);
   }
 }

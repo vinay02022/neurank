@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { cn } from "@/lib/utils";
+import { cn, safeHttpUrl } from "@/lib/utils";
 
 export interface HighlightMention {
   id: string;
@@ -100,15 +100,24 @@ function renderSegments(
   while ((match = citeRegex.exec(text)) !== null) {
     const before = text.slice(lastIdx, match.index);
     if (before) citeSegments.push({ kind: "text", value: before });
-    const url = match[1]?.trim() ?? "";
-    let idx = seenCites.get(url);
+    // SECURITY: citation URLs come from adversarially controllable LLM
+    // output and are rendered in an <a href>. React does NOT block
+    // `javascript:` / `data:` URLs, so we must validate the protocol
+    // ourselves before accepting the marker. Non-http(s) markers fall
+    // back to plain text so the user still sees the citation label.
+    const safe = safeHttpUrl(match[1] ?? "");
+    lastIdx = match.index + match[0].length;
+    if (!safe) {
+      citeSegments.push({ kind: "text", value: match[0] });
+      continue;
+    }
+    let idx = seenCites.get(safe);
     if (!idx) {
       citeIndex += 1;
       idx = citeIndex;
-      seenCites.set(url, idx);
+      seenCites.set(safe, idx);
     }
-    citeSegments.push({ kind: "cite", url, index: idx });
-    lastIdx = match.index + match[0].length;
+    citeSegments.push({ kind: "cite", url: safe, index: idx });
   }
   if (lastIdx < text.length) citeSegments.push({ kind: "text", value: text.slice(lastIdx) });
 
