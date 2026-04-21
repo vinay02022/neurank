@@ -72,12 +72,15 @@ export interface DashboardData {
 
 /**
  * Build the whole dashboard payload for a single project in one pass.
- * All queries are scoped by `projectId` — the caller must have
- * already verified the project belongs to the current workspace.
+ * All queries are scoped by `projectId`; passing `workspaceId` adds
+ * a defense-in-depth constraint so the query still isolates cross
+ * tenant even if a future caller forgets the up-front check.
  */
 export async function getDashboardData(
   projectId: string,
-  opts: { brandName: string; windowDays?: number } = { brandName: "" },
+  opts: { brandName: string; windowDays?: number; workspaceId?: string } = {
+    brandName: "",
+  },
 ): Promise<DashboardData> {
   const windowDays = opts.windowDays ?? 30;
   const now = new Date();
@@ -88,10 +91,14 @@ export async function getDashboardData(
   const prevWindowStart = new Date(windowStart);
   prevWindowStart.setUTCDate(windowStart.getUTCDate() - windowDays);
 
+  const workspaceScope = opts.workspaceId
+    ? { project: { workspaceId: opts.workspaceId } }
+    : {};
+
   const [runs, mentions, recentActions, traffic] = await Promise.all([
     db.visibilityRun.findMany({
       where: {
-        prompt: { projectId },
+        prompt: { projectId, ...(workspaceScope as object) },
         runDate: { gte: prevWindowStart },
       },
       select: {
@@ -107,7 +114,7 @@ export async function getDashboardData(
     db.mention.findMany({
       where: {
         visibilityRun: {
-          prompt: { projectId },
+          prompt: { projectId, ...(workspaceScope as object) },
           runDate: { gte: windowStart },
         },
       },
@@ -119,7 +126,11 @@ export async function getDashboardData(
       },
     }),
     db.actionItem.findMany({
-      where: { projectId, status: "OPEN" },
+      where: {
+        projectId,
+        status: "OPEN",
+        ...(opts.workspaceId ? { project: { workspaceId: opts.workspaceId } } : {}),
+      },
       orderBy: { createdAt: "desc" },
       take: 5,
     }),
@@ -127,6 +138,7 @@ export async function getDashboardData(
       where: {
         projectId,
         occurredAt: { gte: daysAgo(14) },
+        ...(opts.workspaceId ? { project: { workspaceId: opts.workspaceId } } : {}),
       },
       select: { occurredAt: true },
     }),

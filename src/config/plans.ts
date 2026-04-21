@@ -30,9 +30,12 @@ export const PLANS: Record<Plan, PlanTier> = {
     yearly: 0,
     monthlyCredits: 50,
     articlesPerMonth: 3,
-    promptsTracked: 0,
-    platforms: [],
-    projects: 0,
+    // FREE gets a small trial footprint so onboarding can demo the
+    // full GEO flow without a paywall. Upgrade paths unlock real
+    // paid quotas — see STARTER+ below.
+    promptsTracked: 5,
+    platforms: ["CHATGPT"],
+    projects: 1,
     users: 1,
     writingStyles: 0,
     siteAuditsPerMonth: 1,
@@ -50,9 +53,12 @@ export const PLANS: Record<Plan, PlanTier> = {
     yearly: 16,
     monthlyCredits: 1_000,
     articlesPerMonth: 50,
+    // Individual focuses on the Content Studio; GEO tracking is gated
+    // at STARTER+. We still allow 1 project so a solo creator can map
+    // their own brand if they choose to upgrade later.
     promptsTracked: 0,
     platforms: [],
-    projects: 0,
+    projects: 1,
     users: 1,
     writingStyles: 3,
     siteAuditsPerMonth: 5,
@@ -171,4 +177,25 @@ export function planAllowsFeature(
   feature: keyof Pick<PlanTier, "sso" | "api" | "chatsonic" | "dedicatedStrategist">,
 ): boolean {
   return PLANS[plan][feature];
+}
+
+type NumericQuotaKey = keyof Pick<
+  PlanTier,
+  | "promptsTracked"
+  | "projects"
+  | "users"
+  | "articlesPerMonth"
+  | "writingStyles"
+  | "siteAuditsPerMonth"
+  | "monthlyCredits"
+>;
+
+/**
+ * Return the numeric quota for a plan+key. `-1` in the plan config
+ * means "unlimited" and we surface that as {@link Number.POSITIVE_INFINITY}
+ * so callers can always use a plain `if (count >= limit)` check.
+ */
+export function planQuota(plan: Plan, key: NumericQuotaKey): number {
+  const v = PLANS[plan][key];
+  return v === -1 ? Number.POSITIVE_INFINITY : v;
 }

@@ -1,13 +1,21 @@
 /**
- * Centralised rate limiter. Uses Upstash Redis when configured,
- * falls back to an in-memory limiter for local dev (NOT safe in
- * multi-instance deployments).
+ * Centralised rate limiter.
+ *
+ * Production posture: requires Upstash Redis. If either
+ * UPSTASH_REDIS_REST_URL or UPSTASH_REDIS_REST_TOKEN is missing we
+ * FAIL CLOSED — the limiter denies the request rather than silently
+ * falling through to an in-memory limiter that would be bypassable
+ * on serverless platforms (each lambda instance gets its own memory).
+ *
+ * Dev / non-production posture: falls back to an in-memory sliding
+ * window so local development works without Upstash credentials.
  */
 
 import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
 
 let cachedRedis: Redis | null = null;
+let failClosedWarned = false;
 
 function getRedis(): Redis | null {
   if (cachedRedis) return cachedRedis;
@@ -63,6 +71,16 @@ export async function checkRateLimit(
     }
     const r = await limiter.limit(identifier);
     return { success: r.success, remaining: r.remaining };
+  }
+
+  if (process.env.NODE_ENV === "production") {
+    if (!failClosedWarned) {
+      console.error(
+        "[rate-limit] Upstash credentials missing in production — failing closed.",
+      );
+      failClosedWarned = true;
+    }
+    return { success: false, remaining: 0 };
   }
 
   return memoryLimit(`${name}:${identifier}`, cfg.limit, cfg.windowSec * 1000);

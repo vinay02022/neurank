@@ -66,3 +66,24 @@ export function domainFromUrl(url: string): string {
     return url;
   }
 }
+
+/**
+ * Return `url` if it is a well-formed `http:` or `https:` URL, otherwise
+ * null. This is the single source of truth for "safe to place in an
+ * <a href>" across the codebase and must be used whenever we render
+ * LLM-sourced URLs (raw answers, citations, etc.), because `javascript:`,
+ * `data:`, and `vbscript:` URLs are not filtered by React's JSX escaping.
+ */
+export function safeHttpUrl(url: unknown): string | null {
+  if (typeof url !== "string") return null;
+  const trimmed = url.trim();
+  if (!trimmed) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+  return parsed.toString();
+}

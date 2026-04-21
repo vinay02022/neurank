@@ -4,8 +4,9 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 
+import { planQuota } from "@/config/plans";
 import { db } from "@/lib/db";
-import { inngest } from "@/lib/inngest";
+import { inngest, inngestIsConfigured } from "@/lib/inngest";
 import {
   ForbiddenError,
   UnauthorizedError,
@@ -15,6 +16,7 @@ import {
   setCurrentProject,
   switchWorkspace as switchWs,
 } from "@/lib/auth";
+import { checkRateLimit } from "@/lib/rate-limit";
 import {
   brandNameSchema,
   domainSchema,
@@ -42,6 +44,21 @@ function fail(e: unknown): ActionResult<never> {
   return { ok: false, error: "Something went wrong", code: "SERVER" };
 }
 
+/**
+ * Enforce a rate limit on a mutating server action, keyed by the
+ * authenticated user id. Throws ValidationError so existing error
+ * plumbing returns a typed { ok:false } to the client.
+ */
+async function enforceActionRateLimit(
+  bucket: "onboarding" | "api:default",
+  userId: string,
+): Promise<void> {
+  const rl = await checkRateLimit(bucket, userId);
+  if (!rl.success) {
+    throw new ValidationError("Too many requests — please slow down and try again.");
+  }
+}
+
 // ------------------------------------------------------------------
 // createWorkspaceAction
 // ------------------------------------------------------------------
@@ -56,6 +73,7 @@ export async function createWorkspaceAction(
 ): Promise<ActionResult<{ id: string; slug: string }>> {
   try {
     const user = await getCurrentUser();
+    await enforceActionRateLimit("api:default", user.id);
     const { name, slug } = createWorkspaceSchema.parse(input);
 
     const taken = await db.workspace.findUnique({ where: { slug } });
@@ -105,6 +123,7 @@ export async function createProjectAction(
 ): Promise<ActionResult<{ id: string }>> {
   try {
     const { membership, user, workspace } = await getCurrentMembership();
+    await enforceActionRateLimit("api:default", user.id);
     if (membership.role === "MEMBER") {
       throw new ForbiddenError("Admins and owners can create projects");
     }
@@ -112,9 +131,14 @@ export async function createProjectAction(
     // plans unlock additional projects in phase 08.
     const parsed = createProjectSchema.parse(input);
 
+    // Enforce the plan's project quota. -1 in plans.ts means unlimited
+    // (surfaced as Infinity by planQuota()).
     const existingCount = await db.project.count({ where: { workspaceId: workspace.id } });
-    if (workspace.plan === "FREE" && existingCount >= 1) {
-      throw new ForbiddenError("Free plan is limited to 1 project. Upgrade to add more.");
+    const projectQuota = planQuota(workspace.plan, "projects");
+    if (existingCount >= projectQuota) {
+      throw new ForbiddenError(
+        `Your ${workspace.plan} plan allows up to ${projectQuota} project${projectQuota === 1 ? "" : "s"}. Upgrade to add more.`,
+      );
     }
 
     const dupe = await db.project.findUnique({
@@ -169,6 +193,7 @@ export async function addCompetitorAction(
 ): Promise<ActionResult<{ id: string }>> {
   try {
     const { user, workspace } = await getCurrentMembership();
+    await enforceActionRateLimit("api:default", user.id);
     const parsed = addCompetitorSchema.parse(input);
 
     const project = await db.project.findFirst({
@@ -218,6 +243,7 @@ export async function addPromptAction(
 ): Promise<ActionResult<{ id: string }>> {
   try {
     const { user, workspace } = await getCurrentMembership();
+    await enforceActionRateLimit("api:default", user.id);
     const parsed = addPromptSchema.parse(input);
 
     const project = await db.project.findFirst({
@@ -229,6 +255,24 @@ export async function addPromptAction(
       where: { projectId: project.id, text: parsed.text },
     });
     if (existing) return { ok: true, data: { id: existing.id } };
+
+    // Enforce per-plan prompt cap across the whole workspace so one
+    // user cannot blow past the plan by creating prompts under
+    // multiple projects.
+    const promptQuota = planQuota(workspace.plan, "promptsTracked");
+    if (promptQuota <= 0) {
+      throw new ForbiddenError(
+        `Your ${workspace.plan} plan does not include GEO prompt tracking. Upgrade to STARTER or higher.`,
+      );
+    }
+    const currentCount = await db.trackedPrompt.count({
+      where: { project: { workspaceId: workspace.id } },
+    });
+    if (currentCount >= promptQuota) {
+      throw new ForbiddenError(
+        `Your ${workspace.plan} plan allows up to ${promptQuota} tracked prompts. Upgrade or remove an existing prompt to continue.`,
+      );
+    }
 
     const prompt = await db.trackedPrompt.create({
       data: {
@@ -249,7 +293,7 @@ export async function addPromptAction(
       },
     });
 
-    if (process.env.INNGEST_EVENT_KEY) {
+    if (inngestIsConfigured()) {
       await inngest.send({
         name: "geo/prompt.added",
         data: { promptId: prompt.id, workspaceId: workspace.id },
@@ -321,6 +365,7 @@ export async function completeOnboardingAction(
 ): Promise<ActionResult<{ projectId: string }>> {
   try {
     const { user, workspace, membership } = await getCurrentMembership();
+    await enforceActionRateLimit("onboarding", user.id);
     if (membership.role === "MEMBER") {
       throw new ForbiddenError("Only owners or admins can complete onboarding");
     }
@@ -351,6 +396,17 @@ export async function completeOnboardingAction(
       });
       if (existing) throw new ValidationError("That domain already has a project");
 
+      // Onboarding inherits the same plan caps as createProjectAction.
+      const projectCount = await tx.project.count({
+        where: { workspaceId: workspace.id },
+      });
+      const projectQuota = planQuota(workspace.plan, "projects");
+      if (projectCount >= projectQuota) {
+        throw new ForbiddenError(
+          `Your ${workspace.plan} plan allows up to ${projectQuota} project${projectQuota === 1 ? "" : "s"}. Upgrade to add more.`,
+        );
+      }
+
       const project = await tx.project.create({
         data: {
           workspaceId: workspace.id,
@@ -374,8 +430,17 @@ export async function completeOnboardingAction(
       }
 
       if (parsed.prompts.length) {
+        // Onboarding enforces the same plan cap as addPromptsAction so
+        // a user on a restricted plan cannot flood through the wizard.
+        const promptQuota = planQuota(workspace.plan, "promptsTracked");
+        if (promptQuota <= 0 && parsed.prompts.length > 0) {
+          throw new ForbiddenError(
+            `Your ${workspace.plan} plan does not include GEO prompt tracking. Upgrade to STARTER or higher.`,
+          );
+        }
+        const allowed = parsed.prompts.slice(0, promptQuota);
         await tx.trackedPrompt.createMany({
-          data: parsed.prompts.map((text) => ({
+          data: allowed.map((text) => ({
             projectId: project.id,
             text,
             intent: "INFORMATIONAL",
