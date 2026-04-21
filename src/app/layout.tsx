@@ -4,6 +4,8 @@ import { ClerkProvider } from "@clerk/nextjs";
 import { dark } from "@clerk/themes";
 import { ThemeProvider } from "next-themes";
 import { Toaster } from "sonner";
+
+import { TooltipProvider } from "@/components/ui/tooltip";
 import "./globals.css";
 
 const inter = Inter({
@@ -62,8 +64,10 @@ export default function RootLayout({
             enableSystem
             disableTransitionOnChange
           >
-            {children}
-            <Toaster richColors position="top-right" />
+            <TooltipProvider delayDuration={200}>
+              {children}
+              <Toaster richColors position="top-right" theme="dark" />
+            </TooltipProvider>
           </ThemeProvider>
         </body>
       </html>
