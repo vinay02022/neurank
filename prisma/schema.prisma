@@ -264,9 +264,18 @@ model AITrafficEvent {
   ip         String?
   occurredAt DateTime
 
+  // Idempotency key for log uploads. Populated at ingest time as a
+  // hash of (occurredAt || url || userAgent) so that re-uploading the
+  // same nginx/apache log file doesn't double-count bot hits. Left
+  // NULL for beacon events, which are always unique-by-construction
+  // (occurredAt = now) — Postgres treats NULLs as distinct under a
+  // UNIQUE constraint, so multiple beacon rows coexist safely.
+  dedupKey   String?
+
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@index([projectId, bot, occurredAt])
+  @@unique([projectId, dedupKey])
 }
 
 enum AIBot {
@@ -464,10 +473,15 @@ model ActionItem {
   status      ActionStatus @default(OPEN)
   resolvedAt  DateTime?
   createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@index([projectId, status])
+  // Action Center filters by kind + status simultaneously (e.g. "all
+  // open CONTENT_GAP actions"), so index the composite to avoid a
+  // full projectId scan on large projects.
+  @@index([projectId, kind, status])
 }
 
 enum ActionKind {

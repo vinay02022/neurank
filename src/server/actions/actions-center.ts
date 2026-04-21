@@ -8,11 +8,12 @@ import {
   UnauthorizedError,
   ValidationError,
   getCurrentMembership,
+  requirePlan,
 } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { recomputeActionsForProject } from "@/lib/geo/action-generator";
-import { generateGeoText } from "@/lib/ai/router";
+import { InsufficientCreditsError, generateGeoText } from "@/lib/ai/router";
 import { flattenZodError } from "@/lib/validation";
 
 /**
@@ -33,7 +34,7 @@ export type ActionResult<T = undefined> =
   | {
       ok: false;
       error: string;
-      code?: "UNAUTHORIZED" | "FORBIDDEN" | "VALIDATION" | "SERVER";
+      code?: "UNAUTHORIZED" | "FORBIDDEN" | "VALIDATION" | "SERVER" | "INSUFFICIENT_CREDITS";
     };
 
 function fail(e: unknown): ActionResult<never> {
@@ -41,6 +42,16 @@ function fail(e: unknown): ActionResult<never> {
   if (e instanceof ForbiddenError) return { ok: false, error: e.message, code: "FORBIDDEN" };
   if (e instanceof ValidationError) return { ok: false, error: e.message, code: "VALIDATION" };
   if (e instanceof z.ZodError) return { ok: false, error: flattenZodError(e), code: "VALIDATION" };
+  // Credit exhaustion is a business-rule failure, not a server error. The
+  // Action Center UI surfaces this so users see an upgrade/top-up CTA
+  // instead of a generic "something went wrong" toast.
+  if (e instanceof InsufficientCreditsError) {
+    return {
+      ok: false,
+      error: "Not enough credits to draft outreach. Top up or upgrade your plan.",
+      code: "INSUFFICIENT_CREDITS",
+    };
+  }
   console.error("[action.actions-center]", e);
   return { ok: false, error: "Something went wrong", code: "SERVER" };
 }
@@ -249,6 +260,11 @@ export async function recomputeActionsAction(
   try {
     const { user, workspace } = await getCurrentMembership();
     await enforce(user.id);
+    // Defence in depth: the Action Center page already gates on plan,
+    // but the server action is callable via the network and must
+    // independently enforce the paid-plan requirement so a FREE tenant
+    // can't trigger Serper/LLM calls by crafting a fetch.
+    await requirePlan("STARTER");
     const parsed = recomputeSchema.parse(input);
     const project = await db.project.findFirst({
       where: { id: parsed.projectId, workspaceId: workspace.id },
