@@ -32,6 +32,63 @@ function rand(seed: string): number {
   return hashSeed(seed);
 }
 
+function domainFromUrl(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
+
+interface BuildArgs {
+  promptText: string;
+  platform: AIPlatform;
+  mentioned: boolean;
+  position: number | null;
+  sentiment: Sentiment;
+  citations: { url: string; title: string }[];
+  competitorNames: string[];
+}
+
+/**
+ * Compose a believable raw answer for the drill-down view. Embeds the same
+ * `[[cite: url]]` markers the parser recognises in live runs.
+ */
+function buildRawAnswer(args: BuildArgs): string {
+  const voice: Record<AIPlatform, string> = {
+    CHATGPT: "Here's a breakdown based on current reviews.",
+    GEMINI: "Based on current information across the web,",
+    CLAUDE: "I'll give you a balanced view —",
+    PERPLEXITY: "According to current comparisons,",
+    GOOGLE_AIO: "**AI Overview**\n\n",
+    GOOGLE_AI_MODE: "",
+    COPILOT: "",
+    GROK: "",
+    META_AI: "",
+    DEEPSEEK: "",
+  };
+  const intro = voice[args.platform] ?? "Overview:";
+  const competitorsLine = args.competitorNames
+    .slice(0, 3)
+    .map((n, i) => {
+      const cite = args.citations[i];
+      return `**${n}** is a strong option${cite ? ` [[cite: ${cite.url}]]` : ""}.`;
+    })
+    .join(" ");
+
+  const brandLine = args.mentioned
+    ? `**Acme** is also worth considering${args.position ? ` (often ranked #${args.position})` : ""}; its AI-native workflow and remote-first features have earned positive attention [[cite: https://acme.com/product]].`
+    : `Acme is newer in this space and didn't come up in this particular answer.`;
+
+  const closing = args.sentiment === "POSITIVE"
+    ? "For most modern teams, Acme is a strong pick — especially for remote-first organizations."
+    : args.sentiment === "NEGATIVE"
+    ? "Acme has work to do on enterprise maturity compared to the incumbents."
+    : "Any of these can work depending on your team size and workflow needs.";
+
+  return `${intro} "${args.promptText}"\n\n${competitorsLine} ${brandLine}\n\n${closing}`;
+}
+
 async function main() {
   console.log("Seeding Neurank demo workspace…");
 
@@ -147,12 +204,31 @@ async function main() {
       },
     },
   });
+  await db.citation.deleteMany({
+    where: {
+      visibilityRun: {
+        prompt: { projectId: project.id },
+        modelUsed: "seed",
+      },
+    },
+  });
   await db.visibilityRun.deleteMany({
     where: {
       prompt: { projectId: project.id },
       modelUsed: "seed",
     },
   });
+
+  // Pool of plausible authority domains we cite from seeded answers. We pick
+  // 3-5 per run so the drill-down citations-by-domain panel is populated.
+  const authoritySites: { url: string; title: string }[] = [
+    { url: "https://www.g2.com/categories/project-management", title: "G2 — Project Management Software" },
+    { url: "https://zapier.com/blog/best-project-management-software/", title: "Zapier — Best PM Software" },
+    { url: "https://www.capterra.com/project-management-software/", title: "Capterra — PM Software" },
+    { url: "https://www.producthunt.com/topics/project-management", title: "Product Hunt — Project Management" },
+    { url: "https://www.reddit.com/r/projectmanagement/", title: "r/projectmanagement" },
+    { url: "https://www.forbes.com/advisor/business/software/best-project-management-software/", title: "Forbes Advisor" },
+  ];
 
   const today = new Date();
   today.setUTCHours(0, 0, 0, 0);
@@ -176,16 +252,39 @@ async function main() {
             : "NEUTRAL"
           : "NEUTRAL";
 
+        // Pick 3-5 authority citations per run, deterministic per (prompt,platform,day).
+        const citeCount = 3 + Math.floor(rand(`${prompt.id}:${platform}:${d}:cn`) * 3);
+        const startIdx = Math.floor(rand(`${prompt.id}:${platform}:${d}:cs`) * authoritySites.length);
+        const chosenAuthorities = Array.from({ length: citeCount }, (_, i) =>
+          authoritySites[(startIdx + i) % authoritySites.length]!,
+        );
+        // Brand + competitor domains also show up as citations when mentioned.
+        const domainCitations: { url: string; title: string }[] = [];
+        if (mentioned) {
+          domainCitations.push({ url: "https://acme.com/product", title: "Acme — Product" });
+        }
+        const compsInCites = rand(`${prompt.id}:${platform}:${d}:cd`) > 0.4 ? 2 : 1;
+        for (let i = 0; i < compsInCites; i += 1) {
+          const comp = competitors[(i + d) % competitors.length]!;
+          domainCitations.push({ url: `https://${comp.domain}/`, title: `${comp.name} — Home` });
+        }
+
+        const rawAnswer = buildRawAnswer({
+          promptText: prompt.text,
+          platform,
+          mentioned,
+          position,
+          sentiment,
+          citations: [...chosenAuthorities, ...domainCitations],
+          competitorNames: competitors.map((c) => c.name),
+        });
+
         const run = await db.visibilityRun.create({
           data: {
             trackedPromptId: prompt.id,
             platform,
             runDate,
-            rawAnswer: `Seeded answer for "${prompt.text}" on ${platform}. ${
-              mentioned
-                ? `Acme is recommended${position ? ` at position ${position}` : ""}.`
-                : "Acme was not mentioned."
-            }`,
+            rawAnswer,
             modelUsed: "seed",
             tokensUsed: 400,
             brandMentioned: mentioned,
@@ -230,6 +329,15 @@ async function main() {
         }
 
         await db.mention.createMany({ data: mentions });
+
+        const citationRows = [...chosenAuthorities, ...domainCitations].map((c, idx) => ({
+          visibilityRunId: run.id,
+          url: c.url,
+          domain: domainFromUrl(c.url),
+          title: c.title,
+          position: idx + 1,
+        }));
+        await db.citation.createMany({ data: citationRows });
       }
     }
   }
