@@ -4,6 +4,7 @@ import { z } from "zod";
 import { classifyBot } from "@/lib/geo/bot-classifier";
 import { db } from "@/lib/db";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { safeHttpUrl } from "@/lib/utils";
 
 /**
  * Public AI-traffic beacon.
@@ -90,6 +91,18 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // Reject any URL that isn't well-formed http(s). Without this an
+  // attacker could pollute the DB with `javascript:`, `data:`, or
+  // garbled strings that the UI would happily render as text but which
+  // have no analytical value. `safeHttpUrl` also normalises the shape.
+  const safeUrl = safeHttpUrl(parsed.data.url);
+  if (!safeUrl) {
+    return NextResponse.json(
+      { error: "invalid url" },
+      { status: 400, headers: corsHeaders() },
+    );
+  }
+
   // Prefer the UA from the payload (the beacon captures `navigator.userAgent`
   // which is the true browser UA) and fall back to the request header.
   const userAgent = parsed.data.userAgent ?? req.headers.get("user-agent") ?? "";
@@ -120,7 +133,7 @@ export async function POST(req: NextRequest) {
     data: {
       projectId: project.id,
       bot,
-      url: parsed.data.url.slice(0, MAX_URL_LEN),
+      url: safeUrl.slice(0, MAX_URL_LEN),
       userAgent: userAgent.slice(0, MAX_UA_LEN),
       ip,
       occurredAt: new Date(),

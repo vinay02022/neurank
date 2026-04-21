@@ -16,7 +16,18 @@ export function RunPromptButton({ promptId }: { promptId: string }) {
     startTransition(async () => {
       const result = await runPromptAction({ promptId });
       if (result.ok) {
-        setMsg(result.data.mode === "queued" ? "Queued" : "Ran inline");
+        const mode = result.data.mode;
+        // `mode` is one of "queued" | "inline" | "inline-error". The
+        // dev-only inline path can fail even when the server action
+        // itself returns ok:true, so surface that case distinctly
+        // instead of showing a misleading "Ran inline".
+        setMsg(
+          mode === "queued"
+            ? "Queued"
+            : mode === "inline"
+              ? "Ran inline"
+              : "Inline run failed — check server logs",
+        );
         router.refresh();
       } else {
         setMsg(result.error.slice(0, 60));

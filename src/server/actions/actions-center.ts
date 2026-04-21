@@ -59,6 +59,19 @@ async function loadActionInWorkspace(actionId: string, workspaceId: string) {
   return row;
 }
 
+/**
+ * Assert the action is in an open lifecycle state. RESOLVED / DISMISSED
+ * rows are immutable from the UI — a user clicking "resolve" on an
+ * already-dismissed card, or "draft outreach" on a closed citation
+ * action, should surface a clean validation error rather than silently
+ * re-mutate the row (and, in the outreach case, burn LLM credits).
+ */
+function assertActionIsOpen(status: "OPEN" | "IN_PROGRESS" | "RESOLVED" | "DISMISSED"): void {
+  if (status !== "OPEN" && status !== "IN_PROGRESS") {
+    throw new ValidationError("This action is already closed.");
+  }
+}
+
 // ---------------------------------------------------------------------------
 // resolveActionAction
 // ---------------------------------------------------------------------------
@@ -76,6 +89,7 @@ export async function resolveActionAction(
     await enforce(user.id);
     const parsed = resolveSchema.parse(input);
     const action = await loadActionInWorkspace(parsed.id, workspace.id);
+    assertActionIsOpen(action.status);
 
     await db.actionItem.update({
       where: { id: action.id },
@@ -122,6 +136,7 @@ export async function dismissActionAction(
     await enforce(user.id);
     const parsed = dismissSchema.parse(input);
     const action = await loadActionInWorkspace(parsed.id, workspace.id);
+    assertActionIsOpen(action.status);
 
     await db.actionItem.update({
       where: { id: action.id },
@@ -164,6 +179,7 @@ export async function generateOutreachAction(
     await enforce(user.id);
     const parsed = outreachSchema.parse(input);
     const action = await loadActionInWorkspace(parsed.id, workspace.id);
+    assertActionIsOpen(action.status);
 
     if (action.kind !== "CITATION_OPPORTUNITY") {
       throw new ValidationError("Outreach generation is only available for citation actions.");

@@ -3,6 +3,7 @@ import "server-only";
 import type { ActionKind, Prisma, Severity } from "@prisma/client";
 
 import { db } from "@/lib/db";
+import { fetchSocialThreads, type SocialThread } from "./social-engagement";
 
 /**
  * Action generator.
@@ -40,6 +41,12 @@ const COMPETITOR_DOMINANT_RATIO = 0.5;
 const BRAND_WEAK_RATIO = 0.1;
 const REFRESH_DROP_THRESHOLD = 0.2;
 
+// Cap the Social detector's fan-out so a project with many prompts
+// doesn't burn hundreds of Serper calls per recompute. We pick the
+// N most competitor-dominant prompts where our brand is absent and
+// fetch threads for just those.
+const SOCIAL_PROMPT_BUDGET = 5;
+
 function windowStart(days: number): Date {
   const d = new Date();
   d.setUTCDate(d.getUTCDate() - days);
@@ -70,11 +77,12 @@ export async function recomputeActionsForProject(projectId: string): Promise<Rec
     kinds: emptyKinds(),
   };
 
-  const [contentGaps, citationOps, refresh, negative] = await Promise.all([
+  const [contentGaps, citationOps, refresh, negative, social] = await Promise.all([
     detectContentGaps(projectId),
     detectCitationOpportunities(projectId),
     detectContentRefresh(projectId),
     detectNegativeSentiment(projectId),
+    detectSocialEngagement(projectId),
   ]);
 
   const candidates: GeneratedAction[] = [
@@ -82,6 +90,7 @@ export async function recomputeActionsForProject(projectId: string): Promise<Rec
     ...citationOps,
     ...refresh,
     ...negative,
+    ...social,
   ];
 
   for (const candidate of candidates) {
@@ -395,6 +404,86 @@ async function detectNegativeSentiment(projectId: string): Promise<GeneratedActi
     });
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// SOCIAL_ENGAGEMENT
+// ---------------------------------------------------------------------------
+//
+// For each active tracked prompt where our brand has NOT been mentioned
+// in the last window, ask Serper for Reddit/Quora threads that match
+// the prompt text. Each distinct thread becomes one ActionItem with a
+// payload.threadUrl the `SocialCTA` already knows how to render.
+//
+// The detector is bounded in two ways:
+//   - At most `SOCIAL_PROMPT_BUDGET` prompts are queried per recompute.
+//   - `fetchSocialThreads` returns an empty list when `SERPER_API_KEY`
+//     is missing (dev / CI), making this a no-op rather than a spam
+//     source. Production deployments with Serper wired up will see
+//     threads populate automatically on the next recompute cycle.
+
+async function detectSocialEngagement(projectId: string): Promise<GeneratedAction[]> {
+  if (!process.env.SERPER_API_KEY) return [];
+
+  const since = windowStart(WINDOW_DAYS);
+  const prompts = await db.trackedPrompt.findMany({
+    where: { projectId, active: true },
+    select: {
+      id: true,
+      text: true,
+      runs: {
+        where: { runDate: { gte: since } },
+        select: { brandMentioned: true },
+      },
+    },
+  });
+
+  // Rank: prompts with the lowest brand-mention rate in the window go
+  // first, so our Serper budget goes to the most neglected prompts.
+  const ranked = prompts
+    .map((p) => {
+      const total = p.runs.length;
+      if (total === 0) return { id: p.id, text: p.text, rate: 1, total: 0 };
+      const mentioned = p.runs.filter((r) => r.brandMentioned).length;
+      return { id: p.id, text: p.text, rate: mentioned / total, total };
+    })
+    .filter((p) => p.total >= 2 && p.rate < BRAND_WEAK_RATIO)
+    .sort((a, b) => a.rate - b.rate)
+    .slice(0, SOCIAL_PROMPT_BUDGET);
+
+  if (ranked.length === 0) return [];
+
+  const out: GeneratedAction[] = [];
+  for (const p of ranked) {
+    const threads = await fetchSocialThreads(p.text);
+    for (const t of threads) {
+      out.push(toSocialAction(p.id, p.text, t));
+    }
+  }
+  return out;
+}
+
+function toSocialAction(
+  promptId: string,
+  promptText: string,
+  thread: SocialThread,
+): GeneratedAction {
+  return {
+    kind: "SOCIAL_ENGAGEMENT",
+    severity: "MEDIUM",
+    title: `Reply on ${thread.source === "reddit" ? "Reddit" : "Quora"}: ${truncate(thread.title, 70)}`,
+    description:
+      `An active discussion matching "${truncate(promptText, 60)}" is live and your brand ` +
+      `isn't being recommended. Join the thread with a helpful, on-topic reply.`,
+    payload: {
+      key: `social:${thread.url}`,
+      promptId,
+      promptText,
+      threadUrl: thread.url,
+      threadTitle: thread.title,
+      source: thread.source,
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
