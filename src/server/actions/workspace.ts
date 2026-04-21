@@ -12,6 +12,7 @@ import {
   ValidationError,
   getCurrentMembership,
   getCurrentUser,
+  setCurrentProject,
   switchWorkspace as switchWs,
 } from "@/lib/auth";
 import {
@@ -276,6 +277,25 @@ export async function switchWorkspaceAction(
     const ws = await switchWs(workspaceId); // enforces membership
     revalidatePath("/", "layout");
     return { ok: true, data: { id: ws.id } };
+  } catch (e) {
+    return fail(e);
+  }
+}
+
+// ------------------------------------------------------------------
+// switchProjectAction
+// ------------------------------------------------------------------
+
+const switchProjectSchema = z.object({ projectId: z.string().min(10) });
+
+export async function switchProjectAction(
+  input: z.input<typeof switchProjectSchema>,
+): Promise<ActionResult<{ id: string }>> {
+  try {
+    const { projectId } = switchProjectSchema.parse(input);
+    const project = await setCurrentProject(projectId); // enforces workspace scope
+    revalidatePath("/", "layout");
+    return { ok: true, data: { id: project.id } };
   } catch (e) {
     return fail(e);
   }

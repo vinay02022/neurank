@@ -7,7 +7,7 @@
 import { cache } from "react";
 import { cookies } from "next/headers";
 import { auth } from "@clerk/nextjs/server";
-import type { Plan, Role, User, Workspace } from "@prisma/client";
+import type { Plan, Project, Role, User, Workspace } from "@prisma/client";
 
 import { db } from "./db";
 
@@ -44,6 +44,7 @@ export class ValidationError extends Error {
 // ------------------------------------------------------------------
 
 const WS_COOKIE = "ws_id";
+const PROJECT_COOKIE = "pj_id";
 const WS_COOKIE_MAX_AGE = 60 * 60 * 24 * 30; // 30 days
 const PLAN_ORDER: Plan[] = ["FREE", "INDIVIDUAL", "STARTER", "BASIC", "GROWTH", "ENTERPRISE"];
 const ROLE_POWER: Record<Role, number> = { OWNER: 3, ADMIN: 2, MEMBER: 1 };
@@ -160,4 +161,51 @@ export async function switchWorkspace(workspaceId: string): Promise<Workspace> {
 export async function clearWorkspaceCookie(): Promise<void> {
   const jar = await cookies();
   jar.delete(WS_COOKIE);
+  jar.delete(PROJECT_COOKIE);
+}
+
+// ------------------------------------------------------------------
+// Current project — scoped inside the current workspace
+// ------------------------------------------------------------------
+
+/**
+ * Resolve the current project for the active workspace. Uses a
+ * `pj_id` cookie as a preference, but always re-verifies that the
+ * project belongs to the resolved workspace. Falls back to the
+ * oldest project in the workspace; returns null if none exist.
+ */
+export const getCurrentProject = cache(async (): Promise<Project | null> => {
+  const ws = await getCurrentWorkspace();
+  const jar = await cookies();
+  const desiredId = jar.get(PROJECT_COOKIE)?.value;
+
+  if (desiredId) {
+    const project = await db.project.findFirst({
+      where: { id: desiredId, workspaceId: ws.id },
+    });
+    if (project) return project;
+  }
+
+  return db.project.findFirst({
+    where: { workspaceId: ws.id },
+    orderBy: { createdAt: "asc" },
+  });
+});
+
+export async function setCurrentProject(projectId: string): Promise<Project> {
+  const ws = await getCurrentWorkspace();
+  const project = await db.project.findFirst({
+    where: { id: projectId, workspaceId: ws.id },
+  });
+  if (!project) throw new ForbiddenError("Project not found in current workspace");
+
+  const jar = await cookies();
+  jar.set(PROJECT_COOKIE, projectId, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+    maxAge: WS_COOKIE_MAX_AGE,
+  });
+  return project;
 }
