@@ -40,13 +40,25 @@ function memoryLimit(key: string, limit: number, windowMs: number) {
   return { success: true, remaining: limit - bucket.count };
 }
 
-type LimiterName = "webhook:clerk" | "auth:signup" | "onboarding" | "api:default";
+type LimiterName =
+  | "webhook:clerk"
+  | "auth:signup"
+  | "onboarding"
+  | "api:default"
+  | "traffic:beacon"
+  | "traffic:upload";
 
 const LIMITS: Record<LimiterName, { limit: number; windowSec: number }> = {
   "webhook:clerk": { limit: 120, windowSec: 60 },
   "auth:signup": { limit: 10, windowSec: 60 },
   "onboarding": { limit: 30, windowSec: 60 },
   "api:default": { limit: 60, windowSec: 60 },
+  // Beacon is called by AI crawlers themselves — one per page. At 600/min
+  // per IP we can absorb GPTBot crawling 10 pages/sec from one IP before
+  // we start dropping; that is well above typical crawl rates.
+  "traffic:beacon": { limit: 600, windowSec: 60 },
+  // Log uploads are per-user, a few minutes between legitimate uploads.
+  "traffic:upload": { limit: 5, windowSec: 60 },
 };
 
 const redisLimiters = new Map<LimiterName, Ratelimit>();
