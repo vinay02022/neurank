@@ -2,6 +2,7 @@ import "server-only";
 
 import * as cheerio from "cheerio";
 
+import { assertSafeHttpUrl } from "./ssrf";
 import type { CrawledPage, SiteContext } from "./types";
 
 /**
@@ -28,7 +29,7 @@ import type { CrawledPage, SiteContext } from "./types";
  * findings, and HTML is discarded when the run finishes.
  */
 
-const USER_AGENT = "NeurankBot/1.0 (+https://neurank.ai/bot)";
+const USER_AGENT = "NeurankBot/1.0 (+https://neurankk.io/bot)";
 const PER_REQUEST_TIMEOUT_MS = 10_000;
 const DEFAULT_CONCURRENCY = 5;
 const MAX_HTML_BYTES = 2 * 1024 * 1024;
@@ -447,6 +448,11 @@ async function fetchWithTimeout(
   url: string,
   ua: string,
 ): Promise<Response> {
+  // SSRF guard runs before every outbound hop. We intentionally do
+  // NOT cache the DNS result here — the crawler's request volume per
+  // host is low (≤ maxPages) and a fresh check on each URL is the
+  // conservative default. TOCTOU risk is documented in ssrf.ts.
+  await assertSafeHttpUrl(url, { allowHttp: true });
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), PER_REQUEST_TIMEOUT_MS);
   try {

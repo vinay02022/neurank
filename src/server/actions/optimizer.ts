@@ -14,6 +14,7 @@ import { safeHttpUrl } from "@/lib/utils";
 import { CHECKS } from "@/lib/seo/registry";
 import { dedupIssues } from "@/lib/seo/dedup";
 import { computeScore } from "@/lib/seo/score";
+import { UnsafeUrlError, assertSafeHttpUrl } from "@/lib/seo/ssrf";
 import { flattenZodError } from "@/lib/validation";
 import type { AuditCategory, Severity } from "@prisma/client";
 import type { CrawledPage, RawIssue, SiteContext } from "@/lib/seo/types";
@@ -40,6 +41,12 @@ function fail(e: unknown): ActionResult<never> {
   if (e instanceof UnauthorizedError) return { ok: false, error: e.message, code: "UNAUTHORIZED" };
   if (e instanceof ForbiddenError) return { ok: false, error: e.message, code: "FORBIDDEN" };
   if (e instanceof ValidationError) return { ok: false, error: e.message, code: "VALIDATION" };
+  // SSRF violations are VALIDATION-class errors to the user — we never
+  // want to leak why a specific host was rejected (would let attackers
+  // probe which IPs resolve internally).
+  if (e instanceof UnsafeUrlError) {
+    return { ok: false, error: "That URL is not allowed.", code: "VALIDATION" };
+  }
   if (e instanceof z.ZodError) return { ok: false, error: flattenZodError(e), code: "VALIDATION" };
   console.error("[optimizer.action] unexpected error", e);
   return { ok: false, error: "Something went wrong", code: "SERVER" };
@@ -156,6 +163,10 @@ function toSingletonSite(page: CrawledPage): SiteContext {
 }
 
 async function fetchAndParse(url: string): Promise<CrawledPage | null> {
+  // SSRF guard — the optimizer accepts an arbitrary user-supplied URL,
+  // so this is the single most attackable fetch in the product. We
+  // let the thrown UnsafeUrlError bubble up so fail() can normalize it.
+  await assertSafeHttpUrl(url, { allowHttp: true });
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
   try {
@@ -163,7 +174,7 @@ async function fetchAndParse(url: string): Promise<CrawledPage | null> {
       signal: ctrl.signal,
       redirect: "follow",
       headers: {
-        "user-agent": "NeurankOptimizer/1.0 (+https://neurank.ai/bot)",
+        "user-agent": "NeurankOptimizer/1.0 (+https://neurankk.io/bot)",
         accept: "text/html",
       },
     });
