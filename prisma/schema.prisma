@@ -304,6 +304,10 @@ model AuditRun {
   finishedAt   DateTime?
   pagesCrawled Int         @default(0)
   score        Int?
+  // Populated when status=FAILED so the UI can surface a meaningful
+  // reason ("crawler blocked by robots.txt", "network error", etc.)
+  // instead of a silent "something went wrong".
+  error        String?
   createdAt    DateTime    @default(now())
 
   project Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
@@ -322,6 +326,11 @@ enum AuditStatus {
 model AuditIssue {
   id          String        @id @default(cuid())
   auditRunId  String
+  // Stable check identifier (e.g. "meta.title.missing"). Previously
+  // recovered by splitting `message` on ':', which broke as soon as
+  // messages contained colons. Explicit column makes auto-fix routing
+  // reliable and enables efficient check-scoped queries.
+  code        String        @default("")
   category    AuditCategory
   severity    Severity
   url         String
@@ -333,6 +342,7 @@ model AuditIssue {
   auditRun AuditRun @relation(fields: [auditRunId], references: [id], onDelete: Cascade)
 
   @@index([auditRunId, severity])
+  @@index([auditRunId, code])
 }
 
 enum AuditCategory {
