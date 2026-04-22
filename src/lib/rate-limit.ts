@@ -46,7 +46,9 @@ type LimiterName =
   | "onboarding"
   | "api:default"
   | "traffic:beacon"
-  | "traffic:upload";
+  | "traffic:upload"
+  | "audit:run"
+  | "audit:fix";
 
 const LIMITS: Record<LimiterName, { limit: number; windowSec: number }> = {
   "webhook:clerk": { limit: 120, windowSec: 60 },
@@ -59,6 +61,12 @@ const LIMITS: Record<LimiterName, { limit: number; windowSec: number }> = {
   "traffic:beacon": { limit: 600, windowSec: 60 },
   // Log uploads are per-user, a few minutes between legitimate uploads.
   "traffic:upload": { limit: 5, windowSec: 60 },
+  // Audit runs are expensive — crawl + LLM — so we cap at 10/hr per
+  // workspace. Quota enforcement is separate (PlanTier.siteAuditsPerMonth)
+  // but this stops a stuck UI from hammering the runner.
+  "audit:run": { limit: 10, windowSec: 60 * 60 },
+  // Auto-fix generations are one LLM call each; 60/min per workspace.
+  "audit:fix": { limit: 60, windowSec: 60 },
 };
 
 const redisLimiters = new Map<LimiterName, Ratelimit>();

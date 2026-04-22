@@ -1,10 +1,11 @@
 import "server-only";
 
-import { generateObject, generateText } from "ai";
+import { generateObject, generateText, type ModelMessage } from "ai";
 import type { z } from "zod";
 
 import { CREDIT_COST, LLM_MAP, type LLMBinding, type LLMTask } from "@/config/llm-map";
 import { db } from "@/lib/db";
+import { assertSafeHttpUrl } from "@/lib/seo/ssrf";
 
 import { isMockMode, resolveModel } from "./providers";
 
@@ -44,6 +45,14 @@ export interface GenerateArgs {
   temperature?: number;
   /** Skip credit debit (internal/background jobs that debit elsewhere). */
   skipDebit?: boolean;
+  /**
+   * Optional image URLs for multi-modal tasks (e.g. `seo:altfix`). When
+   * set we build a `messages` payload instead of a plain `prompt` so the
+   * underlying provider receives the image bytes. The router validates
+   * each URL with `assertSafeHttpUrl` before forwarding to prevent the
+   * model host from being used as an SSRF proxy.
+   */
+  imageUrls?: string[];
 }
 
 export interface GenerateResult<T = string> {
@@ -120,6 +129,14 @@ async function tryBinding<T>(
   const model = resolveModel(binding);
   const started = Date.now();
 
+  // For multi-modal calls we swap the plain `prompt` for a `messages`
+  // array that carries image parts alongside text. All image URLs are
+  // validated first so the provider can't be used as an SSRF proxy
+  // (the vision endpoint does the fetching on our behalf).
+  const messages = args.imageUrls?.length
+    ? await buildMultimodalMessages(args)
+    : undefined;
+
   let attempt = 0;
   let lastError: unknown;
   while (attempt <= DEFAULT_RETRIES) {
@@ -128,8 +145,9 @@ async function tryBinding<T>(
         const r = await withAbortableTimeout((signal) =>
           generateObject({
             model,
-            system: args.system,
-            prompt: args.prompt,
+            ...(messages
+              ? { messages }
+              : { system: args.system, prompt: args.prompt }),
             schema: args.schema as z.ZodType<T>,
             temperature: args.temperature ?? 0.2,
             maxOutputTokens: args.maxTokens ?? 1024,
@@ -156,8 +174,9 @@ async function tryBinding<T>(
       const r = await withAbortableTimeout((signal) =>
         generateText({
           model,
-          system: args.system,
-          prompt: args.prompt,
+          ...(messages
+            ? { messages }
+            : { system: args.system, prompt: args.prompt }),
           temperature: args.temperature ?? 0.2,
           maxOutputTokens: args.maxTokens ?? 1024,
           abortSignal: signal,
@@ -211,6 +230,44 @@ function withAbortableTimeout<T>(
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Build a multi-modal messages payload from `args.prompt` + image URLs.
+ *
+ * Why here instead of in the caller? Two reasons:
+ *
+ *   1. We want ONE SSRF check per image before the provider fetches it —
+ *      a vision endpoint that blindly fetches attacker-controlled URLs
+ *      would be a classic SSRF proxy.
+ *   2. Every existing caller already passes a `prompt` string; using
+ *      `imageUrls` as an additive option keeps the router surface
+ *      backwards-compatible.
+ */
+async function buildMultimodalMessages(args: GenerateArgs): Promise<ModelMessage[]> {
+  const urls = args.imageUrls ?? [];
+  // Validate every image URL. If any fails the guard we abort the
+  // whole call rather than silently dropping the image — better to
+  // surface "unsafe URL" than to charge credits for a text-only
+  // completion the caller didn't ask for.
+  const safeUrls = await Promise.all(
+    urls.map(async (u) => {
+      const url = await assertSafeHttpUrl(u, { allowHttp: false });
+      return url.toString();
+    }),
+  );
+  const messages: ModelMessage[] = [];
+  if (args.system) {
+    messages.push({ role: "system", content: args.system });
+  }
+  messages.push({
+    role: "user",
+    content: [
+      { type: "text", text: args.prompt },
+      ...safeUrls.map((u) => ({ type: "image" as const, image: new URL(u) })),
+    ],
+  });
+  return messages;
 }
 
 // ---------------------------------------------------------------------------
@@ -270,6 +327,14 @@ function canned(task: LLMTask, prompt: string): string {
   }
   if (task === "seo:metafix") {
     return `Optimized title and meta description for "${prompt.slice(0, 40)}".`;
+  }
+  if (task === "seo:altfix") {
+    // Keep the JSON shape aligned with what draftAlt expects — a flat
+    // `alts` array of strings, one per image it asked about. The
+    // length check in the caller tolerates short arrays.
+    return JSON.stringify({
+      alts: ["Decorative illustration describing the page subject"],
+    });
   }
   return `Mock answer for: ${prompt.slice(0, 120)}`;
 }

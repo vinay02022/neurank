@@ -129,16 +129,24 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  await db.aITrafficEvent.create({
-    data: {
-      projectId: project.id,
-      bot,
-      url: safeUrl.slice(0, MAX_URL_LEN),
-      userAgent: userAgent.slice(0, MAX_UA_LEN),
-      ip,
-      occurredAt: new Date(),
-    },
-  });
+  // Persist the event. We intentionally swallow DB failures here and
+  // still return 204: this is a tracking beacon on the user's public
+  // site, and a transient DB blip must never show up as a CORS/JS
+  // error on a customer page. We log for observability.
+  try {
+    await db.aITrafficEvent.create({
+      data: {
+        projectId: project.id,
+        bot,
+        url: safeUrl.slice(0, MAX_URL_LEN),
+        userAgent: userAgent.slice(0, MAX_UA_LEN),
+        ip,
+        occurredAt: new Date(),
+      },
+    });
+  } catch (err) {
+    console.error("[traffic.beacon] persist failed", err);
+  }
 
   return new NextResponse(null, { status: 204, headers: corsHeaders() });
 }

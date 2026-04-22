@@ -15,6 +15,7 @@ export type LLMTask =
   | "geo:query-perplexity"
   | "chat:default"
   | "seo:metafix"
+  | "seo:altfix"
   | "brand-voice:extract";
 
 export type LLMBinding = {
@@ -44,6 +45,11 @@ export const LLM_MAP: Record<LLMTask, LLMBinding[]> = {
     { provider: "anthropic", model: "claude-3-5-haiku-latest" },
   ],
   "seo:metafix": [{ provider: "openai", model: "gpt-4o-mini" }],
+  // Alt-text drafting requires a vision-capable model since the
+  // input includes the actual image bytes/URL. gpt-4o is the
+  // cheapest vision model we support; no fallback because none of
+  // our other primaries handle image inputs.
+  "seo:altfix": [{ provider: "openai", model: "gpt-4o" }],
   "brand-voice:extract": [{ provider: "openai", model: "gpt-4o-mini" }],
 };
 
@@ -57,5 +63,9 @@ export const CREDIT_COST: Record<LLMTask, number> = {
   "geo:query-perplexity": 1,
   "chat:default": 1,
   "seo:metafix": 1,
+  // Vision calls are noticeably pricier per-image than text — we
+  // charge 2 credits per generated alt string to keep the FREE-tier
+  // economics sane (a 10-image page still fits inside 20 credits).
+  "seo:altfix": 2,
   "brand-voice:extract": 1,
 };

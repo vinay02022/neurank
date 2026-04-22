@@ -264,9 +264,18 @@ model AITrafficEvent {
   ip         String?
   occurredAt DateTime
 
+  // Idempotency key for log uploads. Populated at ingest time as a
+  // hash of (occurredAt || url || userAgent) so that re-uploading the
+  // same nginx/apache log file doesn't double-count bot hits. Left
+  // NULL for beacon events, which are always unique-by-construction
+  // (occurredAt = now) — Postgres treats NULLs as distinct under a
+  // UNIQUE constraint, so multiple beacon rows coexist safely.
+  dedupKey   String?
+
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@index([projectId, bot, occurredAt])
+  @@unique([projectId, dedupKey])
 }
 
 enum AIBot {
@@ -295,6 +304,10 @@ model AuditRun {
   finishedAt   DateTime?
   pagesCrawled Int         @default(0)
   score        Int?
+  // Populated when status=FAILED so the UI can surface a meaningful
+  // reason ("crawler blocked by robots.txt", "network error", etc.)
+  // instead of a silent "something went wrong".
+  error        String?
   createdAt    DateTime    @default(now())
 
   project Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
@@ -313,6 +326,11 @@ enum AuditStatus {
 model AuditIssue {
   id          String        @id @default(cuid())
   auditRunId  String
+  // Stable check identifier (e.g. "meta.title.missing"). Previously
+  // recovered by splitting `message` on ':', which broke as soon as
+  // messages contained colons. Explicit column makes auto-fix routing
+  // reliable and enables efficient check-scoped queries.
+  code        String        @default("")
   category    AuditCategory
   severity    Severity
   url         String
@@ -324,6 +342,7 @@ model AuditIssue {
   auditRun AuditRun @relation(fields: [auditRunId], references: [id], onDelete: Cascade)
 
   @@index([auditRunId, severity])
+  @@index([auditRunId, code])
 }
 
 enum AuditCategory {
@@ -464,10 +483,15 @@ model ActionItem {
   status      ActionStatus @default(OPEN)
   resolvedAt  DateTime?
   createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
 
   project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
 
   @@index([projectId, status])
+  // Action Center filters by kind + status simultaneously (e.g. "all
+  // open CONTENT_GAP actions"), so index the composite to avoid a
+  // full projectId scan on large projects.
+  @@index([projectId, kind, status])
 }
 
 enum ActionKind {

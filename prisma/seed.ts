@@ -447,6 +447,101 @@ async function main() {
     });
   }
 
+  // ---------------------------------------------------------------------
+  // Site Audit demo — one COMPLETED run so the /seo/audit page isn't
+  // empty out of the box. Issue mix covers every check category so the
+  // UI chart + table filters have realistic data to render.
+  // ---------------------------------------------------------------------
+  const existingAuditRun = await db.auditRun.findFirst({
+    where: { projectId: project.id, status: "COMPLETED" },
+    select: { id: true },
+  });
+  if (!existingAuditRun) {
+    const auditRun = await db.auditRun.create({
+      data: {
+        projectId: project.id,
+        status: "COMPLETED",
+        score: 72,
+        pagesCrawled: 48,
+        startedAt: new Date(today.getTime() - 30 * 60_000),
+        finishedAt: new Date(today.getTime() - 28 * 60_000),
+      },
+      select: { id: true },
+    });
+    await db.auditIssue.createMany({
+      data: [
+        {
+          auditRunId: auditRun.id,
+          category: "TECHNICAL",
+          severity: "HIGH",
+          url: "https://acme.com/pricing",
+          message: "meta.title.missing: Page has no <title> tag.",
+          autoFixable: true,
+        },
+        {
+          auditRunId: auditRun.id,
+          category: "TECHNICAL",
+          severity: "MEDIUM",
+          url: "https://acme.com/features",
+          message:
+            "meta.description.missing: Page has no <meta name=\"description\">.",
+          autoFixable: true,
+        },
+        {
+          auditRunId: auditRun.id,
+          category: "GEO_READINESS",
+          severity: "HIGH",
+          url: "https://acme.com/llms.txt",
+          message:
+            "geo.llms_txt.missing: No /llms.txt — AI crawlers can't locate the site's canonical content manifest.",
+          autoFixable: true,
+        },
+        {
+          auditRunId: auditRun.id,
+          category: "GEO_READINESS",
+          severity: "MEDIUM",
+          url: "https://acme.com/help",
+          message:
+            "geo.structured_faq.missing: Page contains 6+ question-style sentences but no FAQPage schema.",
+          autoFixable: false,
+        },
+        {
+          auditRunId: auditRun.id,
+          category: "SCHEMA",
+          severity: "MEDIUM",
+          url: "https://acme.com/integrations",
+          message: "schema.missing: Page has no JSON-LD structured data.",
+          autoFixable: true,
+        },
+        {
+          auditRunId: auditRun.id,
+          category: "CONTENT",
+          severity: "MEDIUM",
+          url: "https://acme.com/blog/ai-pm-2023",
+          message:
+            "content.stale: Content last updated 420 days ago — consider refreshing for AI recency.",
+          autoFixable: false,
+        },
+        {
+          auditRunId: auditRun.id,
+          category: "LINKS",
+          severity: "HIGH",
+          url: "https://acme.com/docs/legacy-guide",
+          message: "links.broken: Page returned HTTP 404.",
+          autoFixable: false,
+        },
+        {
+          auditRunId: auditRun.id,
+          category: "PERFORMANCE",
+          severity: "HIGH",
+          url: "https://acme.com/",
+          message: "perf.low_score: PageSpeed mobile score is 48 — below 60 threshold.",
+          autoFixable: false,
+        },
+      ],
+    });
+  }
+
   console.log(
     `✓ Seeded workspace ${workspace.slug} with ${runsCreated} visibility runs over ${DAYS} days.`,
   );

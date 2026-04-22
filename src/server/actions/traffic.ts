@@ -1,5 +1,7 @@
 "use server";
 
+import { createHash } from "node:crypto";
+
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
@@ -77,9 +79,23 @@ export async function ingestLogsAction(
 
     let persisted = 0;
     let pending: ParsedLogEvent[] = [];
+
+    // Log uploads are often re-run (the user drops a rotated log file
+    // a second time, or uploads a superset covering last week). Compute
+    // a deterministic dedup key per event so the DB UNIQUE constraint
+    // silently drops repeats via `skipDuplicates`. The key intentionally
+    // mirrors the truncation applied to the stored columns, otherwise
+    // a re-upload with slightly different-length data could desync.
+    const makeDedupKey = (evt: ParsedLogEvent): string => {
+      const url = evt.url.slice(0, 2048);
+      const ua = evt.userAgent.slice(0, 2048);
+      const iso = evt.occurredAt.toISOString();
+      return createHash("sha1").update(`${iso}\x1f${url}\x1f${ua}`).digest("hex");
+    };
+
     const flush = async () => {
       if (pending.length === 0) return;
-      await db.aITrafficEvent.createMany({
+      const result = await db.aITrafficEvent.createMany({
         data: pending.map((evt) => ({
           projectId: project.id,
           bot: evt.bot,
@@ -87,9 +103,11 @@ export async function ingestLogsAction(
           userAgent: evt.userAgent.slice(0, 2048),
           ip: evt.ip,
           occurredAt: evt.occurredAt,
+          dedupKey: makeDedupKey(evt),
         })),
+        skipDuplicates: true,
       });
-      persisted += pending.length;
+      persisted += result.count;
       pending = [];
     };
 

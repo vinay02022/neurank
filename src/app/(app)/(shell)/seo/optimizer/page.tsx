@@ -1,16 +1,22 @@
-import { Target } from "lucide-react";
-
-import { ComingSoon } from "@/components/app/coming-soon";
+import { SectionHeader } from "@/components/ui/section-header";
+import { OptimizerForm } from "@/components/seo/optimizer-form";
+import { getCurrentMembership } from "@/lib/auth";
 
 export const metadata = { title: "Content Optimizer" };
+export const dynamic = "force-dynamic";
 
-export default function Page() {
+export default async function Page() {
+  // Resolve membership so the RSC is workspace-scoped for rate
+  // limiting; the client-side form handles its own submission.
+  await getCurrentMembership();
+
   return (
-    <ComingSoon
-      icon={Target}
-      phase="Phase 05"
-      title="Content Optimizer"
-      description="Score a URL against target prompts and get actionable rewrite suggestions."
-    />
+    <div className="space-y-6">
+      <SectionHeader
+        title="Content Optimizer"
+        description="Paste a URL to run the same GEO + SEO checks as the full site audit, focused on a single page."
+      />
+      <OptimizerForm />
+    </div>
   );
 }

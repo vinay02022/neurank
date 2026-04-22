@@ -6,6 +6,7 @@ import { runForPrompt } from "@/lib/geo/engine";
 import { recomputeActionsForProject } from "@/lib/geo/action-generator";
 
 import { geoActionsRecompute } from "./actions-recompute";
+import { trafficPiiPurge } from "./traffic-pii-purge";
 
 /**
  * Inngest v4 moves the trigger into the options bag and uses a single
@@ -185,6 +186,7 @@ export const geoFunctions = [
   geoPromptAdded,
   geoDailyCron,
   geoActionsRecompute,
+  trafficPiiPurge,
 ];
 
 // Narrow subset of the step helper surface we actually use. Inngest's
