@@ -20,9 +20,12 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { InsufficientCreditsError, generate } from "@/lib/ai/router";
 import { executeAudit } from "@/lib/seo/runner";
 import { findCheck } from "@/lib/seo/registry";
+import { UnsafeUrlError, assertSafeHttpUrl } from "@/lib/seo/ssrf";
+import { altBudgetForPlan } from "@/lib/seo/alt-budget";
 import { flattenZodError } from "@/lib/validation";
 import { planQuota } from "@/config/plans";
 import { safeHttpUrl } from "@/lib/utils";
+import type { Plan } from "@prisma/client";
 
 /**
  * Audit server actions.
@@ -57,9 +60,17 @@ function fail(e: unknown): ActionResult<never> {
   if (e instanceof UnauthorizedError) return { ok: false, error: e.message, code: "UNAUTHORIZED" };
   if (e instanceof ForbiddenError) return { ok: false, error: e.message, code: "FORBIDDEN" };
   if (e instanceof ValidationError) return { ok: false, error: e.message, code: "VALIDATION" };
+  if (e instanceof UnsafeUrlError) {
+    // Intentionally generic — don't leak which hosts resolve internally.
+    return { ok: false, error: "That URL is not allowed.", code: "VALIDATION" };
+  }
   if (e instanceof z.ZodError) return { ok: false, error: flattenZodError(e), code: "VALIDATION" };
   if (e instanceof InsufficientCreditsError) {
-    return { ok: false, error: e.message, code: "INSUFFICIENT_CREDITS" };
+    return {
+      ok: false,
+      error: "Not enough credits for this fix. Top up or upgrade your plan.",
+      code: "INSUFFICIENT_CREDITS",
+    };
   }
   console.error("[audit.action] unexpected error", e);
   return { ok: false, error: "Something went wrong", code: "SERVER" };
@@ -200,6 +211,7 @@ export async function autoFixIssueAction(
       },
       select: {
         id: true,
+        code: true,
         message: true,
         url: true,
         autoFixable: true,
@@ -217,15 +229,15 @@ export async function autoFixIssueAction(
       throw new ValidationError("This issue is not auto-fixable.");
     }
 
-    // Recover the underlying checkId from the stored message prefix
-    // ("checkId: ..."). We store it this way so the audit history
-    // remains meaningful even if a check is renamed later.
-    const checkId = issue.message.split(":")[0]?.trim() ?? "";
+    // Prefer the explicit column; fall back to parsing the legacy
+    // "code: message" prefix on rows created before the migration.
+    const checkId = issue.code?.trim() || issue.message.split(":")[0]?.trim() || "";
     const check = findCheck(checkId);
     if (!check) throw new ValidationError(`Unknown check: ${checkId}`);
 
     const patch = await draftPatch({
       workspaceId: workspace.id,
+      plan: workspace.plan,
       checkId,
       issueMessage: issue.message,
       issueUrl: issue.url,
@@ -283,6 +295,7 @@ export async function markIssueFixedAction(
 
 interface DraftArgs {
   workspaceId: string;
+  plan: Plan;
   checkId: string;
   issueMessage: string;
   issueUrl: string;
@@ -453,32 +466,82 @@ async function draftSchema(args: DraftArgs) {
 }
 
 async function draftAlt(args: DraftArgs) {
-  // Full vision-model alt generation is a phase-06 concern — that needs
-  // per-image fetching + cost controls we haven't built yet. For phase
-  // 05 we produce a generic, context-aware starter the user can refine.
-  const context = await fetchPageExcerpt(args.issueUrl);
+  // Vision alt-text generation. We re-fetch the page, pull out up to
+  // N images that are still missing alt, and ask gpt-4o (vision) for
+  // one alt string per image. N is plan-gated in alt-budget.ts so a
+  // single free-tier fix can't run up a 200-image bill.
+  const budget = altBudgetForPlan(args.plan);
+  const { excerpt, images } = await fetchPageForVision(args.issueUrl, budget);
+
+  if (images.length === 0) {
+    // Nothing to fix — either the page fetch failed or every image
+    // already has alt. We still return a patch shape so the UI can
+    // tell the user what happened rather than spinning forever.
+    return {
+      checkId: args.checkId,
+      title: "No images to alt-fix",
+      before: "(all images already have alt attributes, or the page couldn't be fetched)",
+      after: "(nothing to apply)",
+      instructions:
+        "Re-run the audit if you added new images recently — we couldn't find any missing-alt images to draft for.",
+    };
+  }
+
+  // Shape: { alts: string[] } where alts[i] corresponds to images[i].
   const schema = z.object({
-    suggestion: z.string().min(10).max(200),
+    alts: z.array(z.string().min(3).max(200)).min(1).max(budget),
   });
   const result = await generate({
     workspaceId: args.workspaceId,
-    task: "seo:metafix",
+    task: "seo:altfix",
     system:
-      "Propose a concise alt attribute (≤ 120 chars) that describes the most prominent image on the page based on context. Do not include 'image of' or 'picture of'.",
-    prompt: `Page URL: ${args.issueUrl}\nPage text excerpt:\n${context}\n\nReturn a single alt string.`,
+      "You write accessible, SEO-friendly HTML alt text (≤ 120 chars each). Describe what's in the image plainly — avoid 'image of' / 'picture of'. Match the page's tone. Return exactly one alt per image, in order.",
+    prompt: buildAltPrompt(args, excerpt, images.length),
+    imageUrls: images.map((i) => i.src),
     schema,
     temperature: 0.3,
+    maxTokens: 512,
   });
-  const parsed = result.object as { suggestion: string } | undefined;
-  const alt = parsed?.suggestion.trim() ?? "";
+  const parsed = result.object as { alts: string[] } | undefined;
+  const alts = parsed?.alts ?? [];
+
+  // Pair alts with their source images. If the model under-delivered
+  // (fewer alts than images) we keep the pairing positional and leave
+  // the rest as "(regenerate)" placeholders rather than dropping rows.
+  const rows = images.map((img, idx) => ({
+    src: img.src,
+    alt: (alts[idx] ?? "").trim(),
+  }));
+
+  const beforeLines = rows
+    .map((r) => `<img src="${escapeHtml(r.src)}" alt="" />`)
+    .join("\n");
+  const afterLines = rows
+    .map(
+      (r) =>
+        `<img src="${escapeHtml(r.src)}" alt="${escapeHtml(r.alt || "(regenerate)")}" />`,
+    )
+    .join("\n");
+
   return {
     checkId: args.checkId,
-    title: "Proposed image alt",
-    before: 'alt=""',
-    after: `alt="${escapeHtml(alt)}"`,
-    instructions:
-      "Apply this to the page's hero image. For the rest, use Neurank's bulk alt generator in phase 06 (coming soon).",
+    title: `Proposed alt text for ${rows.length} image${rows.length === 1 ? "" : "s"}`,
+    before: beforeLines,
+    after: afterLines,
+    instructions: `Apply each <img alt="…"> to the matching <img src="…"> on the page. We processed the first ${rows.length} missing-alt images (plan cap = ${budget}). Re-run the audit after deploy to confirm the alts stuck.`,
   };
+}
+
+function buildAltPrompt(args: DraftArgs, excerpt: string, count: number): string {
+  return [
+    `Page URL: ${args.issueUrl}`,
+    `Brand: ${args.brandName ?? args.projectDomain}`,
+    "Page text excerpt (for tone and context):",
+    excerpt,
+    "",
+    `${count} image${count === 1 ? "" : "s"} follow this prompt.`,
+    `Return { alts: string[] } with exactly ${count} entries, in the order the images are attached.`,
+  ].join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -542,19 +605,26 @@ function buildSchemaPrompt(args: DraftArgs, context: string): string {
 // ---------------------------------------------------------------------------
 
 const EXCERPT_BUDGET = 1_500;
+const FIX_FETCH_UA = "NeurankBot/1.0 (+https://neurankk.io/bot)";
 
 async function fetchPageExcerpt(url: string): Promise<string> {
   const safe = safeHttpUrl(url);
   if (!safe) return "(no page content available)";
+  // Gate every LLM-grounding fetch through the SSRF guard. Unlike the
+  // user-facing optimizer we don't want to throw here — the auto-fix
+  // UX should still render a useful patch even if context grounding
+  // fails — so we swallow the UnsafeUrlError and return a placeholder.
+  try {
+    await assertSafeHttpUrl(safe, { allowHttp: true });
+  } catch {
+    return "(page host not allowed)";
+  }
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), 8_000);
   try {
     const res = await fetch(safe, {
       signal: ctrl.signal,
-      headers: {
-        "user-agent": "NeurankBot/1.0 (+https://neurank.ai/bot)",
-        accept: "text/html",
-      },
+      headers: { "user-agent": FIX_FETCH_UA, accept: "text/html" },
     });
     if (!res.ok) return "(page returned HTTP " + res.status + ")";
     const text = await res.text();
@@ -567,6 +637,75 @@ async function fetchPageExcerpt(url: string): Promise<string> {
       .slice(0, EXCERPT_BUDGET);
   } catch {
     return "(could not fetch page)";
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+/**
+ * Re-fetch a page and extract (a) a text excerpt for tone, and (b) the
+ * first `maxImages` images that are missing alt text. We normalise
+ * image `src` to absolute, https-only URLs and drop any that don't
+ * pass the SSRF guard so a malicious page can't trick the vision
+ * endpoint into fetching internal assets on our behalf.
+ */
+async function fetchPageForVision(
+  url: string,
+  maxImages: number,
+): Promise<{ excerpt: string; images: { src: string }[] }> {
+  const safe = safeHttpUrl(url);
+  if (!safe) return { excerpt: "(no page content available)", images: [] };
+  try {
+    await assertSafeHttpUrl(safe, { allowHttp: true });
+  } catch {
+    return { excerpt: "(page host not allowed)", images: [] };
+  }
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 8_000);
+  try {
+    const res = await fetch(safe, {
+      signal: ctrl.signal,
+      headers: { "user-agent": FIX_FETCH_UA, accept: "text/html" },
+    });
+    if (!res.ok) return { excerpt: `(page returned HTTP ${res.status})`, images: [] };
+    const html = await res.text();
+    const cheerio = await import("cheerio");
+    const $ = cheerio.load(html);
+
+    const excerpt = $("body")
+      .text()
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, EXCERPT_BUDGET);
+
+    const base = new URL(safe);
+    const images: { src: string }[] = [];
+    const seen = new Set<string>();
+    $("img").each((_i, el) => {
+      if (images.length >= maxImages) return;
+      const alt = ($(el).attr("alt") ?? "").trim();
+      if (alt) return; // already has alt — skip
+      const rawSrc = $(el).attr("src") ?? $(el).attr("data-src") ?? "";
+      if (!rawSrc) return;
+      let abs: string;
+      try {
+        abs = new URL(rawSrc, base).toString();
+      } catch {
+        return;
+      }
+      // Vision provider has to fetch this URL — only accept https so
+      // the provider doesn't downgrade and we don't leak referer.
+      // The SSRF guard runs again inside the router right before the
+      // LLM call; this pre-filter just trims obvious rejections.
+      if (!abs.startsWith("https://")) return;
+      if (seen.has(abs)) return;
+      seen.add(abs);
+      images.push({ src: abs });
+    });
+
+    return { excerpt, images };
+  } catch {
+    return { excerpt: "(could not fetch page)", images: [] };
   } finally {
     clearTimeout(t);
   }
