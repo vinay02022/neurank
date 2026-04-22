@@ -448,6 +448,49 @@ async function main() {
   }
 
   // ---------------------------------------------------------------------
+  // Brand Voice demo — one default voice so the Article wizard has a
+  // ready-to-use dropdown target and the /content/brand-voices listing
+  // isn't empty on first visit.
+  // ---------------------------------------------------------------------
+  const existingVoice = await db.brandVoice.findFirst({
+    where: { workspaceId: workspace.id },
+    select: { id: true },
+  });
+  if (!existingVoice) {
+    await db.brandVoice.create({
+      data: {
+        workspaceId: workspace.id,
+        name: "Acme crisp & clear",
+        description:
+          "Direct, confident, B2B SaaS. Short sentences, concrete examples, no buzzword soup.",
+        isDefault: true,
+        toneTags: ["confident", "concise", "practical", "warm"],
+        profileJson: {
+          tone: ["confident", "concise", "practical", "warm"],
+          sentenceLength: "short",
+          pov: "second-person",
+          vocabulary: "plain business English, avoids jargon",
+          formatting: "prefer H2 per major idea, short paragraphs, bulleted lists",
+          doRules: [
+            "Lead with the outcome, follow with the how",
+            "Use concrete numbers over adjectives",
+            "Prefer active voice",
+          ],
+          dontRules: [
+            "No 'unleash', 'leverage', 'synergy'",
+            "Don't hedge with 'might', 'could potentially'",
+            "No marketing fluff in intros",
+          ],
+        },
+        sampleText: [
+          "Most SEO audits hand you a 200-item PDF and wish you luck. Acme fixes issues you approve — in one click.",
+          "AI search is already 8% of traffic. If your pages aren't structured for it, you're invisible to it.",
+        ].join("\n\n"),
+      },
+    });
+  }
+
+  // ---------------------------------------------------------------------
   // Site Audit demo — one COMPLETED run so the /seo/audit page isn't
   // empty out of the box. Issue mix covers every check category so the
   // UI chart + table filters have realistic data to render.

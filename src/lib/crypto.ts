@@ -1,4 +1,8 @@
-import "server-only";
+// NOTE: no `import "server-only"` here. Unit tests exercise the
+// encrypt/decrypt round-trip via `node --test`, which treats
+// `server-only` as a hard import error. Callers that must be
+// server-only (e.g. the wordpress action) enforce it at their own
+// module boundary.
 
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
 

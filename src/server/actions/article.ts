@@ -19,6 +19,7 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { InsufficientCreditsError, generate } from "@/lib/ai/router";
 import { flattenZodError } from "@/lib/validation";
 import { planQuota } from "@/config/plans";
+import { ARTICLE_CREDIT_COST } from "@/config/article";
 import { slugify } from "@/lib/content/markdown";
 import type { ArticleMode } from "@prisma/client";
 
@@ -53,11 +54,6 @@ export type ActionResult<T = undefined> =
         | "SERVER"
         | "INSUFFICIENT_CREDITS";
     };
-
-// Flat credit cost per article, per spec §7.6 deliverables. The inner
-// LLM calls in the Inngest pipeline use `skipDebit: true` so the
-// workspace is charged exactly once (here) regardless of outline size.
-export const ARTICLE_CREDIT_COST = 20;
 
 function fail(e: unknown): ActionResult<never> {
   if (e instanceof UnauthorizedError) return { ok: false, error: e.message, code: "UNAUTHORIZED" };

@@ -16,16 +16,13 @@ import { executeArticleInline } from "@/lib/article/runner-inline";
  *   - keep the Inngest function body ≤ one step, which simplifies
  *     retries and makes the flow auditable in the Inngest UI
  *
- * The shared FaqPair type is re-exported here because
- * `src/lib/article/compile.ts` (which ships the final HTML) imports
- * it from this module — keeps the FAQ contract discoverable next
- * to where callers wire the pipeline.
+ * The FaqPair contract lives alongside the compiler (which owns the
+ * rendering) in `src/lib/article/compile.ts`. We re-export it here
+ * so existing importers that reached for it via the Inngest module
+ * keep working without a breaking rename.
  */
 
-export interface FaqPair {
-  question: string;
-  answer: string;
-}
+export type { FaqPair } from "@/lib/article/compile";
 
 type ArticleGenerateEvent = {
   data: { articleId: string; workspaceId: string };

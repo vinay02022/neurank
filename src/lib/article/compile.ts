@@ -1,8 +1,15 @@
-import "server-only";
+// NOTE: no `"server-only"` here. The pipeline runs server-side, but
+// the pure markdown → HTML transform is also unit-tested via
+// `node --test`, which would reject a `server-only` guard at import.
+// The only side-effect this module has is the `marked` setOptions
+// call; there's no DB or secret access to protect.
 
 import { marked } from "marked";
 
-import type { FaqPair } from "@/server/inngest/article-generate";
+export interface FaqPair {
+  question: string;
+  answer: string;
+}
 
 /**
  * Compile the final article: markdown → HTML, embed an FAQ JSON-LD
