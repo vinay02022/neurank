@@ -39,8 +39,26 @@ export interface ExecuteAuditResult {
 export async function executeAudit(args: ExecuteAuditArgs): Promise<ExecuteAuditResult> {
   await db.auditRun.update({
     where: { id: args.auditRunId },
-    data: { status: "RUNNING", startedAt: new Date() },
+    data: { status: "RUNNING", startedAt: new Date(), error: null },
   });
+
+  // Progress reporter. We throttle DB writes to ~one every 10 pages
+  // so long crawls don't hammer the database with status updates
+  // while still giving the polling UI sub-minute granularity.
+  let lastReported = 0;
+  const reportProgress = async (pagesCrawled: number): Promise<void> => {
+    if (pagesCrawled - lastReported < 10 && pagesCrawled !== 1) return;
+    lastReported = pagesCrawled;
+    try {
+      await db.auditRun.update({
+        where: { id: args.auditRunId },
+        data: { pagesCrawled },
+      });
+    } catch {
+      // Progress update is advisory — a transient DB blip must never
+      // abort an in-flight audit. We'll re-report at the next tick.
+    }
+  };
 
   try {
     const site = await crawlSite({
@@ -48,6 +66,7 @@ export async function executeAudit(args: ExecuteAuditArgs): Promise<ExecuteAudit
       maxPages: args.maxPages,
       include: toRegexList(args.include),
       exclude: toRegexList(args.exclude),
+      onProgress: reportProgress,
     });
 
     const [sync, async] = await Promise.all([
@@ -77,10 +96,16 @@ export async function executeAudit(args: ExecuteAuditArgs): Promise<ExecuteAudit
       issuesWritten: deduped.length,
     };
   } catch (err) {
+    // Capture a short, user-presentable reason on the run row. We
+    // deliberately truncate to keep the column bounded and avoid
+    // leaking stack traces into the UI.
+    const reason = (err instanceof Error ? err.message : String(err))
+      .replace(/\s+/g, " ")
+      .slice(0, 500);
     await db.auditRun
       .update({
         where: { id: args.auditRunId },
-        data: { status: "FAILED", finishedAt: new Date() },
+        data: { status: "FAILED", finishedAt: new Date(), error: reason },
       })
       .catch(() => {
         /* best-effort; don't mask the real error */
@@ -99,10 +124,16 @@ async function persistIssues(auditRunId: string, issues: RawIssue[]): Promise<vo
 
   const data: Prisma.AuditIssueCreateManyInput[] = issues.map((i) => ({
     auditRunId,
+    // Persist the stable check id in its own column. The legacy
+    // "checkId: message" prefix is kept in `message` for one release
+    // so the UI continues to render correctly against old runs and
+    // any external consumers that parsed it; new readers should use
+    // `code` directly.
+    code: i.checkId,
     category: i.category,
     severity: i.severity,
     url: i.url,
-    message: `${i.checkId}: ${i.message}`,
+    message: i.message,
     autoFixable: i.autoFixable,
   }));
   // createMany ignores duplicates via unique keys we don't have here,

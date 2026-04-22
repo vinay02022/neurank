@@ -1,7 +1,6 @@
 import { redirect } from "next/navigation";
-import { ShieldCheck, AlertCircle, CheckCircle2, FileSearch, Gauge } from "lucide-react";
+import { ShieldCheck, AlertCircle, AlertTriangle, CheckCircle2, FileSearch, Gauge } from "lucide-react";
 
-import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { KpiCard } from "@/components/ui/kpi-card";
@@ -9,6 +8,7 @@ import { SectionHeader } from "@/components/ui/section-header";
 import { AuditScoreRing } from "@/components/seo/audit-score-ring";
 import { AuditRunDrawer } from "@/components/seo/audit-run-drawer";
 import { AuditIssueTable } from "@/components/seo/audit-issue-table";
+import { AuditProgressPoller } from "@/components/seo/audit-progress-poller";
 import {
   getCurrentMembership,
   getCurrentProject,
@@ -52,20 +52,24 @@ export default async function Page() {
       </div>
 
       {data.activeRun ? (
-        <Card className="border-primary/40 bg-primary/5">
-          <CardContent className="flex items-center gap-3 p-4 text-xs">
-            <span className="inline-flex size-6 animate-pulse items-center justify-center rounded-full bg-primary/20">
-              <FileSearch className="size-3.5 text-primary" />
-            </span>
+        <AuditProgressPoller
+          projectId={project.id}
+          initialStatus={data.activeRun.status as "QUEUED" | "RUNNING"}
+          initialPagesCrawled={data.activeRun.pagesCrawled}
+          planMaxPages={Number.isFinite(planMaxPages) ? planMaxPages : 2_500}
+        />
+      ) : data.history[0]?.status === "FAILED" && data.history[0]?.error ? (
+        // Surface the last failure reason. We only show it until the
+        // next successful run lands on top in history — at which
+        // point data.history[0] flips back to COMPLETED and the
+        // banner disappears on its own.
+        <Card className="border-rose-500/40 bg-rose-500/5">
+          <CardContent className="flex items-start gap-3 p-4 text-xs">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-rose-500" />
             <div className="flex-1">
-              <p className="font-medium text-foreground">
-                Audit {data.activeRun.status.toLowerCase()}
-              </p>
-              <p className="text-muted-foreground">
-                This page auto-refreshes — the full results will appear once the run completes.
-              </p>
+              <p className="font-medium text-foreground">Last audit failed</p>
+              <p className="text-muted-foreground">{data.history[0].error}</p>
             </div>
-            <Badge variant="outline">{data.activeRun.status}</Badge>
           </CardContent>
         </Card>
       ) : null}

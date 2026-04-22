@@ -21,6 +21,8 @@ export interface AuditRunSummary {
   startedAt: Date | null;
   finishedAt: Date | null;
   createdAt: Date;
+  /** Populated when status=FAILED — surfaced in the UI banner. */
+  error: string | null;
 }
 
 export interface AuditIssueRow {
@@ -84,6 +86,7 @@ export async function getAuditPageData(
       startedAt: true,
       finishedAt: true,
       createdAt: true,
+      error: true,
     },
   });
 
@@ -96,6 +99,7 @@ export async function getAuditPageData(
         orderBy: [{ severity: "asc" }, { createdAt: "asc" }],
         select: {
           id: true,
+          code: true,
           category: true,
           severity: true,
           url: true,
@@ -108,11 +112,19 @@ export async function getAuditPageData(
     : [];
 
   const issues: AuditIssueRow[] = issuesRaw.map((i) => {
-    // Messages are stored as "<checkId>: <human message>" so we can
-    // recover the checkId later without another round-trip.
-    const idx = i.message.indexOf(":");
-    const checkId = idx > 0 ? i.message.slice(0, idx).trim() : "";
-    const message = idx > 0 ? i.message.slice(idx + 1).trim() : i.message;
+    // Prefer the explicit `code` column introduced in the phase-05
+    // follow-up. Older rows wrote the checkId as a "code: message"
+    // prefix, so fall back to parsing the legacy format for any
+    // pre-migration data still hanging around.
+    let checkId = i.code?.trim() ?? "";
+    let message = i.message;
+    if (!checkId) {
+      const idx = i.message.indexOf(":");
+      if (idx > 0) {
+        checkId = i.message.slice(0, idx).trim();
+        message = i.message.slice(idx + 1).trim();
+      }
+    }
     return {
       id: i.id,
       category: i.category,
@@ -168,6 +180,7 @@ export async function getActiveAuditRun(
       startedAt: true,
       finishedAt: true,
       createdAt: true,
+      error: true,
     },
   });
   return run;
