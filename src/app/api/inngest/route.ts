@@ -1,6 +1,7 @@
 import { serve } from "inngest/next";
 
 import { inngest } from "@/lib/inngest";
+import { articleFunctions } from "@/server/inngest/article-generate";
 import { auditFunctions } from "@/server/inngest/audit-run";
 import { geoFunctions } from "@/server/inngest/geo-run";
 
@@ -21,7 +22,7 @@ import { geoFunctions } from "@/server/inngest/geo-run";
  */
 const handlers = serve({
   client: inngest,
-  functions: [...geoFunctions, ...auditFunctions],
+  functions: [...geoFunctions, ...auditFunctions, ...articleFunctions],
 });
 
 function missingSigningKeyResponse(): Response {
