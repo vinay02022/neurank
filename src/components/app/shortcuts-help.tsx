@@ -17,6 +17,10 @@ const SHORTCUTS: { keys: string[]; description: string; group: string }[] = [
   { keys: ["G", "G"], description: "Go to Brand Visibility", group: "Navigation" },
   { keys: ["G", "S"], description: "Go to Site Audit", group: "Navigation" },
   { keys: ["G", "C"], description: "Go to Chatsonic", group: "Navigation" },
+  { keys: ["⌘", "Shift", "O"], description: "New chat", group: "Chat" },
+  { keys: ["Enter"], description: "Send message", group: "Chat" },
+  { keys: ["Shift", "Enter"], description: "New line in composer", group: "Chat" },
+  { keys: ["/"], description: "Slash commands menu", group: "Chat" },
   { keys: ["?"], description: "Show this help dialog", group: "Help" },
 ];
 

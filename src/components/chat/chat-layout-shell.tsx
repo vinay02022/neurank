@@ -61,6 +61,21 @@ export function ChatLayoutShell({ threads, brandVoices, children }: Props) {
     }
   }, [router]);
 
+  // Cmd/Ctrl+Shift+O — new chat. We don't bind a single-key shortcut
+  // because the composer textarea is the focal element and capturing
+  // bare keys would conflict with normal typing.
+  React.useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      const isMeta = e.metaKey || e.ctrlKey;
+      if (isMeta && e.shiftKey && (e.key === "o" || e.key === "O")) {
+        e.preventDefault();
+        void onNewChat();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onNewChat]);
+
   return (
     // The shell layout caps content at max-w-7xl; the chat pane wants
     // the full vertical viewport so we negate the parent's vertical
