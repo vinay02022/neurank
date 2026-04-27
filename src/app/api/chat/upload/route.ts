@@ -5,20 +5,25 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { planAllowsFeature } from "@/config/plans";
 
 /**
- * POST /api/chat/upload — extract text from an attached file so the
- * model can answer questions about it inside a chat thread.
+ * POST /api/chat/upload — extract content from an attached file so
+ * the model can answer questions about it inside a chat thread.
  *
- * v1 scope: PDFs, DOCX, CSV, plain text, and inline images. Each
- * supported type goes through a dedicated extractor (see
- * `src/server/chat/extractors.ts`) and we return a plain
- * `{ filename, mediaType, text, charCount }` payload. The client
- * embeds that into the next user message as a file part so the model
- * sees the content alongside the user's question.
+ * Supported types: PDFs (pdf-parse), DOCX (mammoth → markdown),
+ * CSV / plain text / markdown, and inline images (PNG/JPEG/WebP).
  *
- * NOTE: Heavy extractor dependencies (pdf-parse, mammoth, papaparse)
- * land in commit 4 alongside the picker UI. For commit 2 we accept
- * uploads but only handle text/plain end-to-end so the route, the
- * size guard, and the rate-limit gate are all exercised.
+ * Response shape varies by attachment kind so the client knows how
+ * to attach it to the next user message:
+ *
+ *   - text-bearing files →
+ *       { kind: "text", filename, mediaType, charCount, text }
+ *   - image files →
+ *       { kind: "image", filename, mediaType, url }
+ *
+ * Images are persisted to Vercel Blob (or base64-encoded as a data
+ * URL when `BLOB_READ_WRITE_TOKEN` is missing in dev) and the URL is
+ * passed through as a `file` part on the next user message; vision-
+ * capable models (GPT-4o, Claude 3.5 Sonnet, Gemini 1.5 Pro) will see
+ * the actual image. Non-vision models simply get a textual hint.
  */
 
 export const runtime = "nodejs";
@@ -80,24 +85,31 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Defer to the extractor module. In commit 2 only text/plain &
-  // text/csv are wired; everything else will land in commit 4.
-  const { extractText } = await import("@/server/chat/extractors");
+  const { extractAttachment } = await import("@/server/chat/extractors");
   const filename =
     typeof (file as Blob & { name?: string }).name === "string"
       ? (file as Blob & { name?: string }).name!
       : "upload";
   try {
-    const text = await extractText({
+    const result = await extractAttachment({
       buffer: Buffer.from(await file.arrayBuffer()),
       mediaType,
       filename,
     });
+    if (result.kind === "image") {
+      return NextResponse.json({
+        kind: "image" as const,
+        filename,
+        mediaType: result.mediaType,
+        url: result.url,
+      });
+    }
     return NextResponse.json({
+      kind: "text" as const,
       filename,
       mediaType,
-      charCount: text.length,
-      text,
+      charCount: result.charCount,
+      text: result.text,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Extraction failed";

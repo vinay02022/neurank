@@ -96,4 +96,80 @@ describe("extractCanvasBlocks", () => {
     assert.equal(r.canvasBlocks.length, 0);
     assert.equal(r.stripped, md);
   });
+
+  it("lifts ```doc fences for the Tiptap document canvas", () => {
+    const md = [
+      "Here is a draft:",
+      "```doc",
+      "# Title",
+      "",
+      "Some body text.",
+      "```",
+      "End.",
+    ].join("\n");
+    const r = extractCanvasBlocks(md);
+    assert.equal(r.canvasBlocks.length, 1);
+    const block = r.canvasBlocks[0]!;
+    assert.equal(block.kind, "doc");
+    assert.match(block.source, /^# Title/);
+    // Doc blocks have no language metadata.
+    assert.equal(block.meta, undefined);
+    assert.match(r.stripped, /data-canvas-kind="doc"/);
+  });
+
+  it("lifts ```code-canvas fences and captures the language hint", () => {
+    const md = [
+      "And here's the implementation:",
+      "```code-canvas:tsx",
+      "export const foo = 1;",
+      "```",
+    ].join("\n");
+    const r = extractCanvasBlocks(md);
+    assert.equal(r.canvasBlocks.length, 1);
+    const block = r.canvasBlocks[0]!;
+    assert.equal(block.kind, "code");
+    assert.equal(block.meta?.language, "tsx");
+    assert.match(block.source, /export const foo = 1;/);
+    assert.match(r.stripped, /data-canvas-kind="code"/);
+  });
+
+  it("accepts ```code-canvas without a language hint", () => {
+    const md = "```code-canvas\nplain text\n```";
+    const r = extractCanvasBlocks(md);
+    assert.equal(r.canvasBlocks.length, 1);
+    const block = r.canvasBlocks[0]!;
+    assert.equal(block.kind, "code");
+    assert.equal(block.meta, undefined);
+  });
+
+  it("lowercases language hints so the renderer's switch matches", () => {
+    const md = "```code-canvas:TSX\nx\n```";
+    const r = extractCanvasBlocks(md);
+    assert.equal(r.canvasBlocks[0]?.meta?.language, "tsx");
+  });
+
+  it("assigns sequential ids when multiple canvas kinds appear", () => {
+    const md = [
+      "```mermaid",
+      "graph A;",
+      "```",
+      "",
+      "```doc",
+      "# h",
+      "```",
+      "",
+      "```code-canvas:js",
+      "1",
+      "```",
+    ].join("\n");
+    const r = extractCanvasBlocks(md);
+    assert.deepEqual(
+      r.canvasBlocks.map((b) => b.id),
+      ["canvas-0", "canvas-1", "canvas-2"],
+    );
+    assert.deepEqual(
+      r.canvasBlocks.map((b) => b.kind),
+      ["mermaid", "doc", "code"],
+    );
+  });
 });
