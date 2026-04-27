@@ -86,9 +86,9 @@ describe("safeFetch", () => {
   });
 
   it("strips Authorization on cross-origin redirects", async () => {
-    let lastHeaders: Headers | null = null;
+    const recorded: Headers[] = [];
     mockFetch((url, init) => {
-      lastHeaders = new Headers(init.headers);
+      recorded.push(new Headers(init.headers));
       if (url.hostname === "1.1.1.1") {
         return new Response(null, {
           status: 302,
@@ -105,8 +105,12 @@ describe("safeFetch", () => {
     });
     assert.equal(res.status, 200);
     // The headers recorded for the LAST hop must not carry credentials.
-    assert.equal(lastHeaders?.get("authorization"), null);
-    assert.equal(lastHeaders?.get("cookie"), null);
+    const last = recorded.at(-1);
+    assert.ok(last, "expected at least one recorded request");
+    assert.equal(last.get("authorization"), null);
+    assert.equal(last.get("cookie"), null);
+    // Sanity: the FIRST hop SHOULD still carry the bearer.
+    assert.equal(recorded[0]?.get("authorization"), "Bearer secret-token");
   });
 
   it("enforces the redirect-hop budget", async () => {
