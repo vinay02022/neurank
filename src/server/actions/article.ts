@@ -454,14 +454,28 @@ function splitSections(md: string): { heading: string; body: string }[] {
 
 function replaceSection(md: string, heading: string, replacement: string): string {
   const esc = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const re = new RegExp(`^##\\s+${esc}\\s*$[\\s\\S]*?(?=^##\\s|\\Z)`, "m");
-  if (!re.test(md)) {
-    // If we can't find the section boundary (e.g. last section with
-    // no trailing H2), fall back to a lenient replace.
-    const laxRe = new RegExp(`^##\\s+${esc}[\\s\\S]*$`, "m");
-    return md.replace(laxRe, replacement);
-  }
-  return md.replace(re, replacement.endsWith("\n") ? replacement : replacement + "\n");
+  // JS regex doesn't support `\Z` for end-of-input; the previous
+  // implementation matched zero characters in some shapes. We split
+  // the document into sections on `^## `, replace the matching one
+  // verbatim, then re-join. This is also safer against headings
+  // that share a prefix (e.g. "Foo" vs "Foo Bar").
+  const re = new RegExp(`(^|\\n)##\\s+${esc}\\s*\\n`, "m");
+  const m = re.exec(md);
+  if (!m) return md;
+  const sectionStart = m.index + m[1]!.length;
+  // Find the next `^## ` after our match (or end-of-doc).
+  const tail = md.slice(sectionStart + (m[0].length - m[1]!.length));
+  const nextMatch = /\n##\s+/.exec(tail);
+  const sectionEnd = nextMatch
+    ? sectionStart + (m[0].length - m[1]!.length) + nextMatch.index
+    : md.length;
+  const trimmed = replacement.replace(/\n+$/, "");
+  return (
+    md.slice(0, sectionStart) +
+    trimmed +
+    (nextMatch ? "\n\n" : "\n") +
+    md.slice(sectionEnd).replace(/^\n+/, "")
+  );
 }
 
 // ---------------------------------------------------------------------------

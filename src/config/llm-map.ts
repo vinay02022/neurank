@@ -12,7 +12,6 @@ export type LLMTask =
   | "article:research"
   | "article:faq"
   | "article:cover-prompt"
-  | "article:cover-image"
   | "geo:query-chatgpt"
   | "geo:query-claude"
   | "geo:query-gemini"
@@ -54,13 +53,10 @@ export const LLM_MAP: Record<LLMTask, LLMBinding[]> = {
   // FAQ generation from the finished article body.
   "article:faq": [{ provider: "openai", model: "gpt-4o-mini" }],
   // DALL·E 3 prompt generator. The image model itself is invoked
-  // outside the text router (see src/lib/images/cover.ts).
+  // outside the text router (see src/lib/article/cover.ts) and is
+  // covered by the flat ARTICLE_CREDIT_COST — no separate task
+  // entry here, because the router never sees it.
   "article:cover-prompt": [{ provider: "openai", model: "gpt-4o-mini" }],
-  // Sentinel entry used purely for credit accounting on cover-image
-  // generation. The actual image call goes via `openai.images.generate`
-  // which isn't a chat model — the router's bindings aren't used,
-  // only CREDIT_COST below.
-  "article:cover-image": [{ provider: "openai", model: "dall-e-3" }],
   "geo:query-chatgpt": [
     { provider: "openai", model: "gpt-4o-mini" },
     { provider: "openai", model: "gpt-4o" },
@@ -101,10 +97,6 @@ export const CREDIT_COST: Record<LLMTask, number> = {
   "article:research": 1,
   "article:faq": 1,
   "article:cover-prompt": 1,
-  // DALL·E 3 is ~4¢ per standard 1024px image; 5 credits ≈ our
-  // break-even at FREE-tier pricing. Kept deliberately conservative
-  // so a runaway `regenerateCover` can't drain a wallet quickly.
-  "article:cover-image": 5,
   "geo:query-chatgpt": 1,
   "geo:query-claude": 1,
   "geo:query-gemini": 1,
