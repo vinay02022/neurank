@@ -18,6 +18,17 @@ export type LLMTask =
   | "geo:query-gemini"
   | "geo:query-perplexity"
   | "chat:default"
+  // Per-model chat tasks. Mapped to a single binding each so the
+  // Chatsonic UI's model picker resolves directly to the user's
+  // intended provider/model with no fallback (a fallback would
+  // silently downgrade the user's choice — wrong for a chat UX).
+  | "chat:gpt-4o"
+  | "chat:gpt-4o-mini"
+  | "chat:claude-sonnet"
+  | "chat:claude-haiku"
+  | "chat:gemini-pro"
+  | "chat:perplexity"
+  | "chat:title"
   | "seo:metafix"
   | "seo:altfix"
   | "brand-voice:extract";
@@ -61,6 +72,19 @@ export const LLM_MAP: Record<LLMTask, LLMBinding[]> = {
     { provider: "openai", model: "gpt-4o-mini" },
     { provider: "anthropic", model: "claude-3-5-haiku-latest" },
   ],
+  "chat:gpt-4o": [{ provider: "openai", model: "gpt-4o" }],
+  "chat:gpt-4o-mini": [{ provider: "openai", model: "gpt-4o-mini" }],
+  "chat:claude-sonnet": [
+    { provider: "anthropic", model: "claude-3-5-sonnet-latest" },
+  ],
+  "chat:claude-haiku": [
+    { provider: "anthropic", model: "claude-3-5-haiku-latest" },
+  ],
+  "chat:gemini-pro": [{ provider: "google", model: "gemini-1.5-pro-latest" }],
+  "chat:perplexity": [{ provider: "perplexity", model: "sonar-pro" }],
+  // Auto-titling fires once per thread after the first user+assistant
+  // exchange. Cheapest model is fine — output is 3-5 words.
+  "chat:title": [{ provider: "openai", model: "gpt-4o-mini" }],
   "seo:metafix": [{ provider: "openai", model: "gpt-4o-mini" }],
   // Alt-text drafting requires a vision-capable model since the
   // input includes the actual image bytes/URL. gpt-4o is the
@@ -86,6 +110,18 @@ export const CREDIT_COST: Record<LLMTask, number> = {
   "geo:query-gemini": 1,
   "geo:query-perplexity": 1,
   "chat:default": 1,
+  // Chat is billed per-token at finish time (see chat-stream.ts);
+  // these per-task entries cover the pre-flight balance check only.
+  // We require >= 1 credit available before starting a stream so
+  // a totally drained workspace can't open a stream that never
+  // completes. Real consumption is `ceil(outputTokens / 1000)`.
+  "chat:gpt-4o": 1,
+  "chat:gpt-4o-mini": 1,
+  "chat:claude-sonnet": 1,
+  "chat:claude-haiku": 1,
+  "chat:gemini-pro": 1,
+  "chat:perplexity": 1,
+  "chat:title": 1,
   "seo:metafix": 1,
   // Vision calls are noticeably pricier per-image than text — we
   // charge 2 credits per generated alt string to keep the FREE-tier

@@ -383,8 +383,9 @@ model BrandVoice {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  articles  Article[]
+  workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  articles    Article[]
+  chatThreads ChatThread[]
 
   @@index([workspaceId])
   @@index([workspaceId, isDefault])
@@ -486,19 +487,34 @@ enum ArticleStatus {
 // ============================================================
 
 model ChatThread {
-  id          String   @id @default(cuid())
-  workspaceId String
-  userId      String
-  title       String   @default("Untitled chat")
-  model       String   @default("gpt-4o-mini")
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id           String      @id @default(cuid())
+  workspaceId  String
+  userId       String
+  title        String      @default("Untitled chat")
+  model        String      @default("gpt-4o-mini")
+  // Optional brand-voice attached to a thread; messages composed in
+  // this thread inherit the voice's tone profile until the user
+  // detaches it (via the `/brand-voice` slash command).
+  brandVoiceId String?
+  // User-pinned threads sort to the top of the list. We keep this as
+  // a plain bool with a composite index so the thread list query is a
+  // single sorted scan rather than UNION ALL.
+  pinned       Boolean     @default(false)
+  // Soft-delete: deletedAt non-null hides the thread from the list
+  // but keeps message history queryable for audit / restore. Hard
+  // delete happens via a periodic job (see Phase 09 polish).
+  deletedAt    DateTime?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
 
-  workspace Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  messages  ChatMessage[]
+  workspace  Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user       User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  brandVoice BrandVoice?   @relation(fields: [brandVoiceId], references: [id], onDelete: SetNull)
+  messages   ChatMessage[]
 
   @@index([workspaceId, userId])
+  @@index([workspaceId, userId, pinned, updatedAt])
+  @@index([workspaceId, deletedAt])
 }
 
 model ChatMessage {
