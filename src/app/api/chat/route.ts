@@ -10,6 +10,7 @@ import { db } from "@/lib/db";
 import { planAllowsFeature } from "@/config/plans";
 import { chatModel, isValidChatModel } from "@/config/chat-models";
 import { buildChatTools, type ChatToolName } from "@/server/chat/tools";
+import { parseSlash } from "@/lib/chat/slash-commands";
 
 /**
  * POST /api/chat — main streaming endpoint for the Chatsonic UI.
@@ -120,9 +121,20 @@ export async function POST(req: NextRequest) {
   }
   const modelOption = chatModel(requestedModelId);
 
+  // Slash-command preprocessor. We inspect the most recent user message
+  // for a leading `/foo` and lift any system hint / forced tools out
+  // of it. The user's original text is left untouched in the thread —
+  // we only modify the model's view of the world for this turn.
+  const slash = parseLastSlash(body.messages);
+
   // Compose system extras. We support per-thread brand voice + a
   // tool-availability hint so the model knows what to call.
-  const enabledTools: ChatToolName[] = (body.tools ?? []).filter(isToolName);
+  const baseEnabledTools: ChatToolName[] = (body.tools ?? []).filter(isToolName);
+  const enabledTools: ChatToolName[] = mergeTools(
+    baseEnabledTools,
+    slash?.forceTools ?? [],
+    slash?.suppressTools ?? [],
+  );
   const tools = buildChatTools({
     enabled: enabledTools,
     workspaceId: workspace.id,
@@ -133,7 +145,9 @@ export async function POST(req: NextRequest) {
   const brandHint = body.brandVoiceProfileMd
     ? `Match this brand voice when writing in our voice:\n${body.brandVoiceProfileMd}`
     : undefined;
-  const systemExtras = [toolHint, brandHint].filter(Boolean).join("\n\n");
+  const systemExtras = [toolHint, brandHint, slash?.systemHint]
+    .filter(Boolean)
+    .join("\n\n");
 
   try {
     return await streamChat({
@@ -163,4 +177,40 @@ export async function POST(req: NextRequest) {
 const TOOL_NAMES = ["webSearch", "readUrl", "generateImage", "createArticleDraft"] as const;
 function isToolName(name: string): name is ChatToolName {
   return (TOOL_NAMES as readonly string[]).includes(name);
+}
+
+function mergeTools(
+  base: ChatToolName[],
+  force: ChatToolName[],
+  suppress: ChatToolName[],
+): ChatToolName[] {
+  const set = new Set(base);
+  for (const t of force) set.add(t);
+  for (const s of suppress) set.delete(s);
+  return Array.from(set);
+}
+
+interface MaybeUiPart {
+  type?: string;
+  text?: string;
+}
+interface MaybeUiMessage {
+  role?: string;
+  parts?: MaybeUiPart[];
+  content?: string;
+}
+
+function parseLastSlash(messages: unknown[]) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i] as MaybeUiMessage;
+    if (!m || m.role !== "user") continue;
+    const text =
+      (m.parts ?? [])
+        .map((p) => (p?.type === "text" ? (p.text ?? "") : ""))
+        .join("")
+        .trim() ||
+      (typeof m.content === "string" ? m.content.trim() : "");
+    return parseSlash(text);
+  }
+  return null;
 }

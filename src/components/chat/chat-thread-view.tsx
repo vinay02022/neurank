@@ -9,7 +9,9 @@ import { toast } from "sonner";
 import { ChatHeader } from "@/components/chat/chat-header";
 import { ChatMessageList } from "@/components/chat/message-list";
 import { ChatComposer } from "@/components/chat/composer";
+import { CanvasPanel } from "@/components/chat/canvas-panel";
 import { setThreadModelAction } from "@/server/actions/chat";
+import type { CanvasBlock } from "@/lib/chat/render-markdown";
 
 export interface ChatModelOption {
   id: string;
@@ -60,6 +62,7 @@ export function ChatThreadView({ thread, models, brandVoices }: Props) {
 
   const [modelId, setModelId] = React.useState(thread.model);
   const [enabledTools, setEnabledTools] = React.useState<string[]>(["webSearch"]);
+  const [activeCanvas, setActiveCanvas] = React.useState<CanvasBlock | null>(null);
 
   const initialMessages = React.useMemo<UIMessage[]>(
     () =>
@@ -144,38 +147,47 @@ export function ChatThreadView({ thread, models, brandVoices }: Props) {
   const isStreaming = status === "submitted" || status === "streaming";
 
   return (
-    <div className="flex h-full min-h-0 flex-1 flex-col">
-      <ChatHeader
-        threadId={thread.id}
-        title={thread.title}
-        pinned={thread.pinned}
-        modelId={modelId}
-        models={models}
-        brandVoices={brandVoices}
-        currentBrandVoiceId={thread.brandVoiceId}
-        onChangeModel={onChangeModel}
-        onClearThread={onClearThread}
-      />
+    <div className="flex h-full min-h-0 flex-1">
+      <div className="flex h-full min-h-0 flex-1 flex-col">
+        <ChatHeader
+          threadId={thread.id}
+          title={thread.title}
+          pinned={thread.pinned}
+          modelId={modelId}
+          models={models}
+          brandVoices={brandVoices}
+          currentBrandVoiceId={thread.brandVoiceId}
+          onChangeModel={onChangeModel}
+          onClearThread={onClearThread}
+        />
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        <ChatMessageList
-          messages={messages}
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <ChatMessageList
+            messages={messages}
+            isStreaming={isStreaming}
+            error={error?.message}
+            onOpenCanvas={setActiveCanvas}
+          />
+        </div>
+
+        <ChatComposer
+          onSend={onSend}
+          onStop={stop}
           isStreaming={isStreaming}
-          error={error?.message}
+          modelId={modelId}
+          models={models}
+          onChangeModel={onChangeModel}
+          enabledTools={enabledTools}
+          onChangeTools={setEnabledTools}
+          toolOptions={TOOL_OPTIONS}
         />
       </div>
 
-      <ChatComposer
-        onSend={onSend}
-        onStop={stop}
-        isStreaming={isStreaming}
-        modelId={modelId}
-        models={models}
-        onChangeModel={onChangeModel}
-        enabledTools={enabledTools}
-        onChangeTools={setEnabledTools}
-        toolOptions={TOOL_OPTIONS}
-      />
+      {activeCanvas && (
+        <div className="hidden h-full w-[420px] shrink-0 lg:block">
+          <CanvasPanel block={activeCanvas} onClose={() => setActiveCanvas(null)} />
+        </div>
+      )}
     </div>
   );
 }

@@ -1,12 +1,21 @@
 "use client";
 
 import * as React from "react";
-import { Loader2, Send, Square } from "lucide-react";
+import { Loader2, Send, Slash, Square } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ChatModelPicker } from "@/components/chat/model-picker";
 import { ToolPills } from "@/components/chat/tool-pills";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { SLASH_HELP } from "@/lib/chat/slash-commands";
 import { cn } from "@/lib/utils";
 import type { ChatModelOption } from "@/components/chat/chat-thread-view";
 
@@ -96,12 +105,20 @@ export function ChatComposer({
             )}
           />
           <div className="flex items-center justify-between gap-2 px-2 pb-2">
-            <ChatModelPicker
-              modelId={modelId}
-              models={models}
-              onChange={onChangeModel}
-              size="sm"
-            />
+            <div className="flex items-center gap-1">
+              <ChatModelPicker
+                modelId={modelId}
+                models={models}
+                onChange={onChangeModel}
+                size="sm"
+              />
+              <SlashHelpButton
+                onPick={(cmd) => {
+                  setDraft((d) => (d ? d : `${cmd} `));
+                  requestAnimationFrame(() => textareaRef.current?.focus());
+                }}
+              />
+            </div>
             {isStreaming ? (
               <Button size="sm" variant="outline" onClick={onStop}>
                 <Square className="size-3.5" />
@@ -128,5 +145,46 @@ export function ChatComposer({
         </div>
       </div>
     </div>
+  );
+}
+
+function SlashHelpButton({
+  onPick,
+}: {
+  onPick: (commandStub: string) => void;
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-7 px-2 text-xs text-muted-foreground"
+          aria-label="Slash commands"
+        >
+          <Slash className="size-3.5" />
+          /
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-[260px]">
+        <DropdownMenuLabel className="text-[11px] uppercase text-muted-foreground">
+          Slash commands
+        </DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        {SLASH_HELP.map((c) => {
+          const stub = c.name.split(" ")[0] ?? c.name;
+          return (
+            <DropdownMenuItem
+              key={c.name}
+              onSelect={() => onPick(stub)}
+              className="flex flex-col items-start gap-0.5"
+            >
+              <span className="font-mono text-xs">{c.name}</span>
+              <span className="text-[11px] text-muted-foreground">{c.description}</span>
+            </DropdownMenuItem>
+          );
+        })}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

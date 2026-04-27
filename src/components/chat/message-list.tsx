@@ -1,24 +1,26 @@
 "use client";
 
 import * as React from "react";
-import { Bot, Loader2, User } from "lucide-react";
+import { Bot, ExternalLink, Loader2, User } from "lucide-react";
 import type { UIMessage } from "ai";
 
 import { cn } from "@/lib/utils";
-import { renderMarkdown } from "@/lib/chat/render-markdown";
+import {
+  renderChatMessage,
+  type CanvasBlock,
+  type Citation,
+} from "@/lib/chat/render-markdown";
 
 interface Props {
   messages: UIMessage[];
   isStreaming: boolean;
   error?: string;
+  onOpenCanvas?: (block: CanvasBlock) => void;
 }
 
-export function ChatMessageList({ messages, isStreaming, error }: Props) {
+export function ChatMessageList({ messages, isStreaming, error, onOpenCanvas }: Props) {
   const bottomRef = React.useRef<HTMLDivElement>(null);
 
-  // Auto-scroll on every message change. We don't tie this to a
-  // dependency on a single token because `messages` changes per chunk
-  // during streaming — that gives us a smooth follow-the-cursor feel.
   React.useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages]);
@@ -36,6 +38,7 @@ export function ChatMessageList({ messages, isStreaming, error }: Props) {
       {messages.map((m, idx) => {
         const text = collapseText(m);
         const isUser = m.role === "user";
+        const rendered = text ? renderChatMessage(text) : null;
         return (
           <article
             key={m.id ?? `m-${idx}`}
@@ -65,18 +68,25 @@ export function ChatMessageList({ messages, isStreaming, error }: Props) {
                   "dark:prose-invert",
                 )}
               >
-                {text ? (
-                  <div
-                    // marked output is server-trusted for stored
-                    // history; for streaming chunks the same renderer
-                    // runs client-side. Both code paths sanitise via
-                    // marked's default escaping.
-                    dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }}
-                  />
+                {rendered ? (
+                  <div dangerouslySetInnerHTML={{ __html: rendered.html }} />
                 ) : (
                   <div className="text-xs italic text-muted-foreground">…</div>
                 )}
               </div>
+
+              {rendered?.canvasBlocks.length ? (
+                <CanvasPills
+                  blocks={rendered.canvasBlocks}
+                  onOpen={onOpenCanvas}
+                />
+              ) : null}
+
+              {rendered?.citations.length ? (
+                <CitationList citations={rendered.citations} />
+              ) : null}
+
+              <ToolUseList parts={m.parts ?? []} />
             </div>
           </article>
         );
@@ -105,4 +115,80 @@ function collapseText(m: UIMessage): string {
     .map((p) => (p.type === "text" ? p.text : ""))
     .join("")
     .trim();
+}
+
+function CanvasPills({
+  blocks,
+  onOpen,
+}: {
+  blocks: CanvasBlock[];
+  onOpen?: (b: CanvasBlock) => void;
+}) {
+  if (!onOpen) return null;
+  return (
+    <div className="flex flex-wrap gap-2">
+      {blocks.map((b) => (
+        <button
+          key={b.id}
+          type="button"
+          onClick={() => onOpen(b)}
+          className="inline-flex items-center gap-1 rounded-full border bg-background px-2 py-0.5 text-[11px] text-foreground transition hover:bg-muted"
+        >
+          <ExternalLink className="size-3" />
+          Open {b.kind} in canvas
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function CitationList({ citations }: { citations: Citation[] }) {
+  return (
+    <ol className="mt-1 space-y-0.5 text-[11px] text-muted-foreground">
+      {citations.map((c) => (
+        <li key={c.index} className="flex items-start gap-1">
+          <span className="font-medium">[{c.index}]</span>
+          <a
+            href={c.url}
+            target="_blank"
+            rel="noreferrer noopener"
+            className="truncate text-primary hover:underline"
+          >
+            {c.url}
+          </a>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+interface ToolPart {
+  type: string;
+  toolName?: string;
+  state?: string;
+  output?: unknown;
+}
+
+function ToolUseList({ parts }: { parts: unknown[] }) {
+  // The AI SDK emits "tool-{name}" parts on the message; for simple
+  // visibility we render a small badge per call. We don't deserialise
+  // outputs here — clicking a badge could open a debug drawer in a
+  // later pass.
+  const tools = (parts as ToolPart[]).filter((p) =>
+    typeof p.type === "string" && p.type.startsWith("tool-"),
+  );
+  if (!tools.length) return null;
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {tools.map((t, i) => (
+        <span
+          key={i}
+          className="inline-flex items-center gap-1 rounded-full border bg-muted/40 px-2 py-0.5 text-[10px] text-muted-foreground"
+        >
+          {t.type.replace(/^tool-/, "")}
+          {t.state ? ` · ${t.state}` : ""}
+        </span>
+      ))}
+    </div>
+  );
 }

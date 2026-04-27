@@ -14,7 +14,7 @@ import { LLM_MAP, type LLMTask } from "@/config/llm-map";
 import { db } from "@/lib/db";
 
 import { isMockMode, resolveModel } from "./providers";
-import { InsufficientCreditsError } from "./router";
+import { InsufficientCreditsError, generate } from "./router";
 
 /**
  * Streaming chat layer for Chatsonic.
@@ -169,6 +169,16 @@ export async function streamChat(args: StreamChatArgs): Promise<Response> {
         success: true,
       });
 
+      // Fire-and-forget auto-title. We deliberately do NOT await this
+      // — it should never block stream finalisation, and a title
+      // miss is harmless (user can rename inline).
+      void maybeAutoTitle({
+        threadId: args.threadId,
+        userText: userMessage?.text ?? "",
+        assistantText: event.text ?? "",
+        workspaceId: args.workspaceId,
+      });
+
       await args.onPersisted?.({
         threadId: args.threadId,
         assistantMessageId: assistantId,
@@ -255,6 +265,13 @@ function buildMockResponse({ args, binding, startedAt }: BuildMockArgs): Respons
         latencyMs: Date.now() - startedAt,
         success: true,
       });
+      void maybeAutoTitle({
+        threadId: args.threadId,
+        userText,
+        assistantText: reply,
+        workspaceId: args.workspaceId,
+      });
+
       await args.onPersisted?.({
         threadId: args.threadId,
         assistantMessageId: assistantId,
@@ -530,4 +547,77 @@ function serialiseError(err: unknown): string {
   } catch {
     return "unknown error";
   }
+}
+
+// ---------------------------------------------------------------------------
+// Auto-title — generate a 3-5 word title after the first exchange
+// ---------------------------------------------------------------------------
+
+const AUTO_TITLE_PLACEHOLDERS = new Set([
+  "Untitled chat",
+  "New chat",
+  "",
+]);
+
+const TITLE_PROMPT = [
+  "Summarise the conversation below as a 3-5 word title.",
+  "Rules: title-case, no quotes, no trailing punctuation, no emojis.",
+  "Output ONLY the title — no preamble, no explanation.",
+].join(" ");
+
+async function maybeAutoTitle(args: {
+  threadId: string;
+  workspaceId: string;
+  userText: string;
+  assistantText: string;
+}): Promise<void> {
+  if (!args.userText.trim() || !args.assistantText.trim()) return;
+  try {
+    const thread = await db.chatThread.findUnique({
+      where: { id: args.threadId },
+      select: { id: true, title: true },
+    });
+    if (!thread) return;
+    if (!AUTO_TITLE_PLACEHOLDERS.has(thread.title.trim())) return;
+
+    const prompt = [
+      `User: ${args.userText.slice(0, 600)}`,
+      `Assistant: ${args.assistantText.slice(0, 600)}`,
+    ].join("\n");
+
+    const result = await generate({
+      task: "chat:title",
+      workspaceId: args.workspaceId,
+      system: TITLE_PROMPT,
+      prompt,
+      maxTokens: 24,
+      temperature: 0.4,
+      // Auto-title is a side-effect of an already-billed chat turn;
+      // we don't want to charge an extra credit per generated title.
+      skipDebit: true,
+    });
+    const cleaned = sanitiseTitle(result.text);
+    if (!cleaned) return;
+    await db.chatThread.update({
+      where: { id: args.threadId },
+      data: { title: cleaned },
+    });
+  } catch (err) {
+    // Auto-title is best-effort: any failure is logged and swallowed
+    // so we never disrupt the user-visible message flow.
+    console.error("[chat-stream] auto-title failed", err);
+  }
+}
+
+function sanitiseTitle(raw: string): string {
+  const stripped = raw
+    .replace(/^["'`\s]+|["'`\s]+$/g, "")
+    .replace(/[\r\n]+/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/[.,!?;:]+$/g, "")
+    .trim();
+  if (!stripped) return "";
+  // Cap to 60 characters — DB column is unlimited but the sidebar
+  // truncates anything longer anyway.
+  return stripped.slice(0, 60);
 }
