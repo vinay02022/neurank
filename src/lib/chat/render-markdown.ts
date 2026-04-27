@@ -38,10 +38,18 @@ import { sanitizeChatHtml } from "@/lib/content/sanitize";
  * list, and round-tripping through marked is awkward.
  */
 
+export type CanvasKind = "mermaid" | "html" | "chart" | "doc" | "code";
+
 export interface CanvasBlock {
   id: string;
-  kind: "mermaid" | "html" | "chart";
+  kind: CanvasKind;
   source: string;
+  /**
+   * Free-form metadata pulled out of the fence info string. For
+   * `code-canvas` blocks the renderer expects a `language` key (e.g.
+   * `language: "tsx"`); other kinds may add their own keys later.
+   */
+  meta?: Record<string, string>;
 }
 
 export interface RenderedMessage {
@@ -56,7 +64,12 @@ export interface Citation {
 }
 
 const CITE_RE = /\[\[cite:\s*([^\]\s][^\]]*?)\]\]/g;
-const CANVAS_FENCE_RE = /```(mermaid|html-canvas|chart)\n([\s\S]*?)```/g;
+// Fence-info string for canvas blocks. We accept the existing
+// shorthands (`mermaid`, `html-canvas`, `chart`) plus the new `doc`
+// and `code-canvas` markers. `code-canvas` may carry a language hint
+// after a colon, e.g. ```code-canvas:tsx — captured into `meta.language`.
+const CANVAS_FENCE_RE =
+  /```(mermaid|html-canvas|chart|doc|code-canvas)(?::([A-Za-z0-9_+\-]+))?\n([\s\S]*?)```/g;
 
 export function renderMarkdown(text: string): string {
   // Backwards-compatible default — returns just the HTML string.
@@ -96,15 +109,41 @@ export function extractCanvasBlocks(text: string): {
 } {
   const blocks: CanvasBlock[] = [];
   let i = 0;
-  const stripped = text.replace(CANVAS_FENCE_RE, (_match, kindRaw: string, body: string) => {
-    const kind = kindRaw === "html-canvas" ? "html" : (kindRaw as "mermaid" | "chart");
-    const id = `canvas-${i++}`;
-    blocks.push({ id, kind, source: body.trim() });
-    // Leave a placeholder marker the message renderer can swap for a
-    // pill / button. We use HTML so marked passes it through verbatim.
-    return `<div data-canvas-block="${id}" data-canvas-kind="${kind}"></div>`;
-  });
+  const stripped = text.replace(
+    CANVAS_FENCE_RE,
+    (_match, kindRaw: string, langRaw: string | undefined, body: string) => {
+      const kind = canvasKindFromFence(kindRaw);
+      const id = `canvas-${i++}`;
+      const meta: Record<string, string> = {};
+      if (kind === "code" && langRaw) meta.language = langRaw.toLowerCase();
+      blocks.push({
+        id,
+        kind,
+        source: body.trim(),
+        meta: Object.keys(meta).length ? meta : undefined,
+      });
+      // Leave a placeholder marker the message renderer can swap for a
+      // pill / button. We use HTML so marked passes it through verbatim.
+      return `<div data-canvas-block="${id}" data-canvas-kind="${kind}"></div>`;
+    },
+  );
   return { stripped, canvasBlocks: blocks };
+}
+
+function canvasKindFromFence(fence: string): CanvasKind {
+  switch (fence) {
+    case "html-canvas":
+      return "html";
+    case "code-canvas":
+      return "code";
+    case "doc":
+    case "mermaid":
+    case "chart":
+      return fence;
+    default:
+      // Should be unreachable given the regex but TS narrows here.
+      return "mermaid";
+  }
 }
 
 function replaceCitations(text: string): {

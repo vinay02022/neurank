@@ -4,7 +4,7 @@ import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 import * as cheerio from "cheerio";
 
-import { assertSafeHttpUrl, UnsafeUrlError } from "@/lib/seo/ssrf";
+import { UnsafeUrlError, safeFetch } from "@/lib/seo/ssrf";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { generate } from "@/lib/ai/router";
 import { createArticleDraftAction } from "@/server/actions/article";
@@ -16,12 +16,16 @@ import { createArticleDraftAction } from "@/server/actions/article";
  * server; the model's tool-call payloads are dispatched here, and the
  * results are streamed back to the client as `tool-output-available`
  * UI message chunks. We never expose tool implementations to the
- * client — they would leak the Serper key, the Inngest event sender,
- * etc.
+ * client — they would leak provider keys (Tavily, OpenAI), the
+ * Inngest event sender, etc.
  *
- * Mock mode: when `SERPER_API_KEY` is missing the web-search and
- * URL-reader tools degrade gracefully to a clearly-labelled "no key"
- * response so chat still works locally without secrets.
+ * Mock mode: when no search-provider key is configured the web-search
+ * tool degrades gracefully to a clearly-labelled "no key" response so
+ * chat still works locally without secrets. Same for image generation.
+ *
+ * Search provider precedence: TAVILY_API_KEY (preferred — LLM-tuned
+ * snippets and built-in answer summary) wins over SERPER_API_KEY
+ * (cheaper Google SERP fallback). Setting both pins to Tavily.
  */
 
 export type ChatToolName =
@@ -53,10 +57,23 @@ export function buildChatTools(args: BuildToolsArgs): ToolSet {
 }
 
 // ---------------------------------------------------------------------------
-// webSearch — Serper Google Search proxy
+// webSearch — Tavily (preferred) / Serper fallback
 // ---------------------------------------------------------------------------
 
 const SEARCH_TIMEOUT_MS = 10_000;
+
+interface NormalizedSearchHit {
+  title: string;
+  url: string;
+  snippet: string;
+}
+
+interface NormalizedSearchResult {
+  query: string;
+  results: NormalizedSearchHit[];
+  answerBox: { answer: string | null; source: string | null } | null;
+  provider: "tavily" | "serper" | "mock";
+}
 
 function webSearch(workspaceId: string) {
   return tool({
@@ -75,43 +92,22 @@ function webSearch(workspaceId: string) {
         return { error: "Search rate limit reached. Try again in a minute." };
       }
 
-      const key = process.env.SERPER_API_KEY;
-      if (!key) {
+      const tavilyKey = process.env.TAVILY_API_KEY;
+      const serperKey = process.env.SERPER_API_KEY;
+
+      try {
+        if (tavilyKey) return await tavilySearch(query, count ?? 6, tavilyKey);
+        if (serperKey) return await serperSearch(query, count ?? 6, serperKey);
+        // No provider configured — return a structured mock so the
+        // model sees a clear signal rather than crashing the turn.
         return {
-          mock: true,
           query,
           results: [],
+          answerBox: null,
+          provider: "mock" as const,
           message:
-            "Web search is not configured (SERPER_API_KEY missing). Answer from your own knowledge and tell the user the live search isn't wired.",
+            "Web search is not configured. Set TAVILY_API_KEY (preferred) or SERPER_API_KEY in env. Answer from your own knowledge and tell the user the live search isn't wired.",
         };
-      }
-      try {
-        const res = await fetch("https://google.serper.dev/search", {
-          method: "POST",
-          headers: { "content-type": "application/json", "X-API-KEY": key },
-          body: JSON.stringify({ q: query, num: count ?? 6 }),
-          signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
-        });
-        if (!res.ok) return { error: `Search failed (${res.status})`, query };
-        const json = (await res.json()) as {
-          organic?: Array<{ title?: string; link?: string; snippet?: string }>;
-          answerBox?: { answer?: string; snippet?: string; link?: string };
-        };
-        const answerBox = json.answerBox
-          ? {
-              answer: json.answerBox.answer ?? json.answerBox.snippet ?? null,
-              source: json.answerBox.link ?? null,
-            }
-          : null;
-        const results = (json.organic ?? [])
-          .filter((o) => o.link && o.title)
-          .slice(0, count ?? 6)
-          .map((o) => ({
-            title: o.title!,
-            url: o.link!,
-            snippet: o.snippet ?? "",
-          }));
-        return { query, answerBox, results };
       } catch (err) {
         return {
           error: err instanceof Error ? err.message : "Search failed",
@@ -120,6 +116,85 @@ function webSearch(workspaceId: string) {
       }
     },
   });
+}
+
+async function tavilySearch(
+  query: string,
+  count: number,
+  key: string,
+): Promise<NormalizedSearchResult> {
+  // Tavily's /search endpoint returns LLM-friendly snippets and an
+  // optional `answer` summary when `include_answer: true`. Depth
+  // "basic" matches our 10s timeout budget; "advanced" can take 20s+.
+  const res = await fetch("https://api.tavily.com/search", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      api_key: key,
+      query,
+      max_results: count,
+      search_depth: "basic",
+      include_answer: true,
+    }),
+    signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
+  });
+  if (!res.ok) {
+    throw new Error(`Tavily search failed (${res.status})`);
+  }
+  const json = (await res.json()) as {
+    answer?: string | null;
+    results?: Array<{ title?: string; url?: string; content?: string }>;
+  };
+  const answer = (json.answer ?? "").trim();
+  return {
+    query,
+    provider: "tavily",
+    answerBox: answer ? { answer, source: null } : null,
+    results: (json.results ?? [])
+      .filter((r) => r.url && r.title)
+      .slice(0, count)
+      .map((r) => ({
+        title: r.title!,
+        url: r.url!,
+        snippet: r.content ?? "",
+      })),
+  };
+}
+
+async function serperSearch(
+  query: string,
+  count: number,
+  key: string,
+): Promise<NormalizedSearchResult> {
+  const res = await fetch("https://google.serper.dev/search", {
+    method: "POST",
+    headers: { "content-type": "application/json", "X-API-KEY": key },
+    body: JSON.stringify({ q: query, num: count }),
+    signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
+  });
+  if (!res.ok) throw new Error(`Serper search failed (${res.status})`);
+  const json = (await res.json()) as {
+    organic?: Array<{ title?: string; link?: string; snippet?: string }>;
+    answerBox?: { answer?: string; snippet?: string; link?: string };
+  };
+  return {
+    query,
+    provider: "serper",
+    answerBox: json.answerBox
+      ? {
+          answer: json.answerBox.answer ?? json.answerBox.snippet ?? null,
+          source: json.answerBox.link ?? null,
+        }
+      : null,
+    results: (json.organic ?? [])
+      .filter((o) => o.link && o.title)
+      .slice(0, count)
+      .map((o) => ({
+        title: o.title!,
+        url: o.link!,
+        snippet: o.snippet ?? "",
+      })),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -139,28 +214,23 @@ function readUrl() {
       url: z.string().url(),
     }),
     execute: async ({ url }) => {
-      let safe;
+      // safeFetch re-validates EVERY redirect hop through the SSRF
+      // guard, so an attacker can't bounce us off a public host
+      // through a 302 to 169.254.169.254. Plain `fetch(url, { redirect: "follow" })`
+      // would silently follow the redirect after the initial validation.
       try {
-        safe = await assertSafeHttpUrl(url, { allowHttp: true });
-      } catch (err) {
-        if (err instanceof UnsafeUrlError) {
-          return { error: "URL is not allowed (private host or unsafe scheme)." };
-        }
-        throw err;
-      }
-      try {
-        const res = await fetch(safe, {
-          signal: AbortSignal.timeout(READ_TIMEOUT_MS),
-          redirect: "follow",
-          headers: { "user-agent": USER_AGENT, accept: "text/html" },
+        const res = await safeFetch(url, {
+          allowHttp: true,
+          init: {
+            signal: AbortSignal.timeout(READ_TIMEOUT_MS),
+            headers: { "user-agent": USER_AGENT, accept: "text/html" },
+          },
         });
-        if (!res.ok) return { url: safe.toString(), error: `Fetch failed (${res.status})` };
+        const finalUrl = res.url || url;
+        if (!res.ok) return { url: finalUrl, error: `Fetch failed (${res.status})` };
         const ctype = res.headers.get("content-type") ?? "";
         if (!ctype.includes("html") && !ctype.includes("text")) {
-          return {
-            url: safe.toString(),
-            error: `Unsupported content type: ${ctype}`,
-          };
+          return { url: finalUrl, error: `Unsupported content type: ${ctype}` };
         }
         const html = (await readBounded(res, MAX_READ_BYTES)).slice(0, MAX_READ_BYTES);
         const $ = cheerio.load(html);
@@ -168,21 +238,24 @@ function readUrl() {
         const title =
           ($("meta[property='og:title']").attr("content") ?? "").trim() ||
           ($("title").first().text() ?? "").trim() ||
-          safe.toString();
+          finalUrl;
         const text = $("article, main, body")
           .text()
           .replace(/\s+/g, " ")
           .trim()
           .slice(0, MAX_TEXT_CHARS);
         return {
-          url: safe.toString(),
+          url: finalUrl,
           title: title.slice(0, 200),
           textChars: text.length,
           text,
         };
       } catch (err) {
+        if (err instanceof UnsafeUrlError) {
+          return { error: "URL is not allowed (private host or unsafe scheme)." };
+        }
         return {
-          url: safe.toString(),
+          url,
           error: err instanceof Error ? err.message : "Fetch failed",
         };
       }

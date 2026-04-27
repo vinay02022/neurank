@@ -441,6 +441,93 @@ export async function regenerateSectionAction(
 // been moved to `@/lib/article/sections` (pure, unit-tested).
 
 // ---------------------------------------------------------------------------
+// createArticleFromCanvasAction
+// ---------------------------------------------------------------------------
+//
+// "Send to Article" affordance on the chat Document canvas. The user
+// has been collaborating with the model on a long-form draft inside
+// the canvas tab and now wants to promote it into a real Article row
+// with the editor URL. We create a GENERATED article (skips the LLM
+// pipeline — content is already authored) so the editor opens the
+// content immediately. Quota is still enforced.
+
+const fromCanvasSchema = z.object({
+  title: z.string().trim().min(2).max(160),
+  contentMd: z.string().min(1).max(120_000),
+  language: z.string().min(2).max(8).default("en"),
+  brandVoiceId: z.string().optional(),
+});
+
+export async function createArticleFromCanvasAction(
+  input: z.infer<typeof fromCanvasSchema>,
+): Promise<ActionResult<{ articleId: string }>> {
+  try {
+    const { workspace } = await getCurrentMembership();
+    const parsed = fromCanvasSchema.parse(input);
+
+    // Same monthly cap as the wizard. We could exempt canvas-sourced
+    // articles since the LLM cost is borne by the chat per-token
+    // ledger already, but undercounting quotas tends to cause hairy
+    // billing surprises down the line — keep the rule symmetrical.
+    const quota = planQuota(workspace.plan, "articlesPerMonth");
+    if (Number.isFinite(quota)) {
+      const start = new Date();
+      start.setUTCDate(1);
+      start.setUTCHours(0, 0, 0, 0);
+      const used = await db.article.count({
+        where: {
+          workspaceId: workspace.id,
+          createdAt: { gte: start },
+          status: { in: ["GENERATING", "GENERATED", "PUBLISHED", "FAILED"] },
+        },
+      });
+      if (used >= quota) {
+        return {
+          ok: false,
+          error: `You've used ${used}/${quota} articles this month. Upgrade for more.`,
+          code: "QUOTA",
+        };
+      }
+    }
+
+    let brandVoiceId: string | undefined;
+    if (parsed.brandVoiceId) {
+      const owned = await db.brandVoice.findFirst({
+        where: { id: parsed.brandVoiceId, workspaceId: workspace.id },
+        select: { id: true },
+      });
+      if (!owned) throw new ForbiddenError("Brand voice not found in this workspace");
+      brandVoiceId = owned.id;
+    }
+
+    const { mdToHtml } = await import("@/lib/content/markdown");
+    const article = await db.article.create({
+      data: {
+        workspaceId: workspace.id,
+        brandVoiceId,
+        title: parsed.title,
+        slug: slugify(parsed.title),
+        // Canvas-authored articles default to INSTANT mode — they
+        // never went through the multi-step wizard, and INSTANT is
+        // what the editor's "regenerate" affordance falls back to.
+        mode: "INSTANT" as ArticleMode,
+        language: parsed.language,
+        contentMd: parsed.contentMd,
+        contentHtml: mdToHtml(parsed.contentMd),
+        // Mark as GENERATED (not DRAFT) so the editor's publish
+        // pipeline is unblocked immediately.
+        status: "GENERATED",
+      },
+      select: { id: true },
+    });
+    revalidatePath("/content/articles");
+    return { ok: true, data: { articleId: article.id } };
+  } catch (e) {
+    return fail(e);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // deleteArticleAction
 // ---------------------------------------------------------------------------
 

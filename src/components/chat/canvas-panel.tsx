@@ -1,29 +1,28 @@
 "use client";
 
 import * as React from "react";
-import { ExternalLink, X } from "lucide-react";
+import dynamic from "next/dynamic";
+import { Loader2, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
 import type { CanvasBlock } from "@/lib/chat/render-markdown";
 
 /**
  * Right-rail canvas panel for chat.
  *
- * Three rendering paths today:
+ * Five rendering paths, each lazy-loaded so the chat shell doesn't
+ * pay the bundle cost when no one's opened a canvas:
  *
- *   1. `mermaid` — diagrams. We lazy-load `mermaid` from the npm
- *      bundle on first render so the chat surface stays light when no
- *      one's drawing diagrams.
- *   2. `html`    — sandboxed iframe with `srcDoc`. `sandbox=""` (no
- *      tokens) blocks scripts, popups, top navigation, form submission
- *      and same-origin access. The agent gets a static HTML preview
- *      surface that's safe even if an attacker tricks the model into
- *      returning malicious markup.
- *   3. `chart`   — a JSON spec rendered via the existing `recharts`
- *      package (already pulled in for analytics dashboards). For now
- *      we render a simple "data preview" while the full Recharts
- *      mapping ships in Phase 08.
+ *   1. `mermaid`  — diagrams via the `mermaid` package.
+ *   2. `html`     — sandboxed iframe with `srcDoc`. `sandbox=""` (no
+ *                   tokens) blocks scripts, popups, top navigation,
+ *                   form submission and same-origin access.
+ *   3. `chart`    — JSON spec → Recharts (line / bar / area / pie).
+ *   4. `doc`      — Tiptap WYSIWYG editor on top of marked-rendered
+ *                   markdown. "Send to Article" promotes the canvas
+ *                   into a full Article row in Content Studio.
+ *   5. `code`     — Monaco read-only viewer with language detection
+ *                   from the fence info string (`code-canvas:tsx`).
  *
  * The panel is controlled — the parent decides which `block` (if any)
  * is currently active. It's not a portal/dialog because the chat
@@ -35,6 +34,33 @@ interface Props {
   block: CanvasBlock | null;
   onClose: () => void;
 }
+
+const Loader = (
+  <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+    <Loader2 className="mr-2 size-3 animate-spin" />
+    Loading canvas…
+  </div>
+);
+
+// Only `mermaid`, `chart`, `doc`, `code` carry meaningful client-only
+// runtime cost (Mermaid SVG, Recharts, Tiptap, Monaco). `html` is a
+// plain iframe and doesn't need code-splitting.
+const MermaidView = dynamic(
+  () => import("@/components/chat/canvas/mermaid-canvas").then((m) => m.MermaidCanvas),
+  { ssr: false, loading: () => Loader },
+);
+const ChartView = dynamic(
+  () => import("@/components/chat/canvas/chart-canvas").then((m) => m.ChartCanvas),
+  { ssr: false, loading: () => Loader },
+);
+const DocumentView = dynamic(
+  () => import("@/components/chat/canvas/document-canvas").then((m) => m.DocumentCanvas),
+  { ssr: false, loading: () => Loader },
+);
+const CodeView = dynamic(
+  () => import("@/components/chat/canvas/code-canvas").then((m) => m.CodeCanvas),
+  { ssr: false, loading: () => Loader },
+);
 
 export function CanvasPanel({ block, onClose }: Props) {
   if (!block) return null;
@@ -51,86 +77,57 @@ export function CanvasPanel({ block, onClose }: Props) {
           <X className="size-4" />
         </Button>
       </header>
-      <div className="min-h-0 flex-1 overflow-auto p-3">
-        {block.kind === "mermaid" ? (
-          <MermaidView source={block.source} />
-        ) : block.kind === "html" ? (
-          <HtmlSandbox source={block.source} />
-        ) : (
-          <ChartView source={block.source} />
-        )}
+      <div className="min-h-0 flex-1 overflow-auto">
+        <Renderer block={block} />
       </div>
       <footer className="border-t bg-muted/30 px-4 py-2 text-[11px] text-muted-foreground">
-        Rendered locally. Edits don’t round-trip to the model.
+        Rendered locally. Document edits round-trip back to your articles.
       </footer>
     </aside>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Mermaid
-// ---------------------------------------------------------------------------
-
-function MermaidView({ source }: { source: string }) {
-  const ref = React.useRef<HTMLDivElement>(null);
-  const [error, setError] = React.useState<string | null>(null);
-
-  React.useEffect(() => {
-    let cancelled = false;
-    setError(null);
-    (async () => {
-      try {
-        const mermaid = (await import("mermaid")).default;
-        mermaid.initialize({
-          startOnLoad: false,
-          theme: "neutral",
-          securityLevel: "strict",
-        });
-        const id = `m-${Math.random().toString(36).slice(2, 10)}`;
-        const { svg } = await mermaid.render(id, source);
-        if (cancelled) return;
-        if (ref.current) ref.current.innerHTML = svg;
-      } catch (err) {
-        if (cancelled) return;
-        setError(err instanceof Error ? err.message : "Failed to render diagram");
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [source]);
-
-  if (error) {
-    return (
-      <div className="space-y-2">
-        <div className="rounded border border-destructive/40 bg-destructive/5 p-2 text-xs text-destructive">
-          Mermaid render failed: {error}
+function Renderer({ block }: { block: CanvasBlock }) {
+  switch (block.kind) {
+    case "mermaid":
+      return (
+        <div className="p-3">
+          <MermaidView source={block.source} />
         </div>
-        <pre className="whitespace-pre-wrap rounded border bg-muted/30 p-2 text-[11px]">
-          {source}
-        </pre>
-      </div>
-    );
+      );
+    case "html":
+      return <HtmlInlineSandbox source={block.source} />;
+    case "chart":
+      return (
+        <div className="p-3">
+          <ChartView source={block.source} />
+        </div>
+      );
+    case "doc":
+      return <DocumentView source={block.source} />;
+    case "code":
+      return (
+        <CodeView source={block.source} language={block.meta?.language} />
+      );
+    default:
+      return (
+        <pre className="whitespace-pre-wrap p-3 text-[11px]">{block.source}</pre>
+      );
   }
-  return <div ref={ref} className="mermaid-canvas overflow-auto" />;
 }
 
-// ---------------------------------------------------------------------------
-// Sandboxed HTML
-// ---------------------------------------------------------------------------
-
-function HtmlSandbox({ source }: { source: string }) {
-  // sandbox="" with NO tokens means: no scripts, no top-nav, no
-  // form-submission, no same-origin. The iframe still renders the
-  // raw HTML, CSS, and inline styling. That's the right trade-off
-  // for "preview a static design the LLM produced".
+function HtmlInlineSandbox({ source }: { source: string }) {
+  // Inline rather than dynamic-imported because an iframe with
+  // `sandbox=""` is a tiny DOM node — no runtime cost worth code-
+  // splitting. We still wrap a plain document around fragments so
+  // the model can ship `<div>...` instead of full HTML pages.
   const doc = React.useMemo(() => wrapHtml(source), [source]);
   return (
     <iframe
       title="HTML canvas"
       sandbox=""
       srcDoc={doc}
-      className="h-full min-h-[480px] w-full rounded border bg-white"
+      className="h-full min-h-[480px] w-full bg-white"
     />
   );
 }
@@ -138,81 +135,4 @@ function HtmlSandbox({ source }: { source: string }) {
 function wrapHtml(body: string): string {
   if (/<html[\s>]/i.test(body)) return body;
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{font-family:system-ui,-apple-system,sans-serif;margin:16px;color:#0f172a;background:#fff}img{max-width:100%}</style></head><body>${body}</body></html>`;
-}
-
-// ---------------------------------------------------------------------------
-// Chart spec (placeholder until Recharts mapping in Phase 08)
-// ---------------------------------------------------------------------------
-
-interface ChartSpec {
-  type?: "line" | "bar" | "area" | "pie";
-  data?: Array<Record<string, unknown>>;
-  xKey?: string;
-  yKeys?: string[];
-}
-
-function ChartView({ source }: { source: string }) {
-  const parsed = React.useMemo<ChartSpec | null>(() => {
-    try {
-      const json = JSON.parse(source);
-      return typeof json === "object" && json !== null ? (json as ChartSpec) : null;
-    } catch {
-      return null;
-    }
-  }, [source]);
-
-  if (!parsed) {
-    return (
-      <div className="space-y-2 text-xs">
-        <p className="text-destructive">
-          Chart spec is not valid JSON.
-        </p>
-        <pre className="whitespace-pre-wrap rounded border bg-muted/30 p-2">{source}</pre>
-      </div>
-    );
-  }
-
-  const rows = parsed.data ?? [];
-  const cols = rows[0] ? Object.keys(rows[0]) : [];
-
-  return (
-    <div className="space-y-3">
-      <div className="rounded border bg-muted/30 p-2 text-xs text-muted-foreground">
-        Chart preview ({parsed.type ?? "line"}) — rendered as a data
-        table for now. Rich Recharts rendering ships in Phase 08.
-      </div>
-      <div className="overflow-auto rounded border">
-        <table className="w-full text-xs">
-          <thead className="bg-muted/40">
-            <tr>
-              {cols.map((c) => (
-                <th key={c} className={cn("px-2 py-1 text-left font-medium")}>
-                  {c}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.slice(0, 50).map((r, i) => (
-              <tr key={i} className="odd:bg-background even:bg-muted/20">
-                {cols.map((c) => (
-                  <td key={c} className="px-2 py-1">
-                    {String(r[c] ?? "")}
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      {rows.length > 50 && (
-        <div className="text-[10px] text-muted-foreground">
-          Showing first 50 of {rows.length} rows.
-          <a className="ml-1 inline-flex items-center gap-1" href="#" onClick={(e) => e.preventDefault()}>
-            Open full <ExternalLink className="size-3" />
-          </a>
-        </div>
-      )}
-    </div>
-  );
 }
