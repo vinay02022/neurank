@@ -143,12 +143,21 @@ export async function startCheckoutAction(
       // ensures the webhook can attribute both checkout.session.*
       // and customer.subscription.* events back to us even if the
       // customer object isn't created via our flow.
-      metadata: { workspaceId: workspace.id },
+      metadata: { workspaceId: workspace.id, plan: parsed.plan },
       subscription_data: {
-        metadata: { workspaceId: workspace.id },
+        // Spec §2: every new subscription gets a 7-day free trial.
+        // Stripe will surface this in the checkout UI and fire
+        // `customer.subscription.trial_will_end` 3 days before the
+        // end so we can prompt the user to confirm payment.
+        trial_period_days: 7,
+        metadata: { workspaceId: workspace.id, plan: parsed.plan },
       },
-      success_url: `${appOrigin()}/billing?checkout=success`,
-      cancel_url: `${appOrigin()}/billing?checkout=cancelled`,
+      // We expose both the new spec-shaped query params and the
+      // existing `?checkout=` ones so the billing page can
+      // recognise either — the older variant predates the spec and
+      // is still linked from email receipts.
+      success_url: `${appOrigin()}/billing?checkout=success&success=1`,
+      cancel_url: `${appOrigin()}/billing?checkout=cancelled&canceled=1`,
       allow_promotion_codes: true,
       // Tax: Stripe Tax requires explicit opt-in. Disabled here; we'll
       // turn it on when Stripe Tax is configured per region.

@@ -13,6 +13,17 @@ import {
   planForCustomer,
 } from "@/lib/billing/subscription-status";
 import { creditWarningLevel } from "@/lib/billing/credit-warning";
+import {
+  PLAN_ORDER,
+  checkFeature,
+  checkPlatforms,
+  checkQuota,
+  featureMatrix,
+  planLimitFromFeature,
+  planLimitFromQuota,
+  planRank,
+  smallestPlanWith,
+} from "@/lib/billing/gates";
 
 /**
  * Billing helpers are pure — env-driven price lookups, plan derivation,
@@ -166,5 +177,153 @@ describe("creditWarningLevel", () => {
       creditWarningLevel({ plan: "ENTERPRISE", creditBalance: 1 }),
       "ok",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Plan / quota gates (lib/billing/gates.ts)
+// ---------------------------------------------------------------------------
+
+describe("planRank / PLAN_ORDER", () => {
+  it("orders FREE → INDIVIDUAL → STARTER → BASIC → GROWTH → ENTERPRISE", () => {
+    assert.deepEqual(PLAN_ORDER, [
+      "FREE",
+      "INDIVIDUAL",
+      "STARTER",
+      "BASIC",
+      "GROWTH",
+      "ENTERPRISE",
+    ]);
+    assert.ok(planRank("FREE") < planRank("STARTER"));
+    assert.ok(planRank("STARTER") < planRank("GROWTH"));
+    assert.ok(planRank("GROWTH") < planRank("ENTERPRISE"));
+  });
+});
+
+describe("smallestPlanWith", () => {
+  it("returns the cheapest plan that satisfies the predicate", () => {
+    // `api: true` first appears on BASIC in the default matrix.
+    assert.equal(
+      smallestPlanWith((p) => p.api === true),
+      "BASIC",
+    );
+    // `sso: true` is ENTERPRISE-only.
+    assert.equal(
+      smallestPlanWith((p) => p.sso === true),
+      "ENTERPRISE",
+    );
+  });
+
+  it("falls back to ENTERPRISE when no plan matches", () => {
+    assert.equal(
+      smallestPlanWith(() => false),
+      "ENTERPRISE",
+    );
+  });
+});
+
+describe("checkFeature", () => {
+  it("returns ok=true when the plan includes the feature", () => {
+    const r = checkFeature("BASIC", "api");
+    assert.equal(r.ok, true);
+  });
+
+  it("returns PLAN_LIMIT with the cheapest matching plan when the feature is missing", () => {
+    const r = checkFeature("FREE", "api");
+    assert.equal(r.ok, false);
+    if (!r.ok) {
+      assert.equal(r.reason, "PLAN_LIMIT");
+      assert.equal(r.feature, "api");
+      assert.equal(r.currentPlan, "FREE");
+      assert.equal(r.suggestedPlan, "BASIC");
+      assert.match(r.message, /API/);
+    }
+  });
+
+  it("planLimitFromFeature converts a failing check into the action envelope", () => {
+    const check = checkFeature("FREE", "api");
+    assert.equal(check.ok, false);
+    if (check.ok) return;
+    const env = planLimitFromFeature(check);
+    assert.equal(env.ok, false);
+    assert.equal(env.code, "PLAN_LIMIT");
+    assert.equal(env.upgrade, true);
+    assert.equal(env.currentPlan, "FREE");
+    assert.equal(env.suggestedPlan, "BASIC");
+    assert.equal(env.feature, "api");
+  });
+});
+
+describe("checkQuota", () => {
+  it("returns ok with limit + used when under cap", () => {
+    // FREE allows 3 articles/month.
+    const r = checkQuota("FREE", "articlesPerMonth", 1);
+    assert.equal(r.ok, true);
+    if (r.ok) {
+      assert.equal(r.limit, 3);
+      assert.equal(r.used, 1);
+    }
+  });
+
+  it("returns PLAN_LIMIT when the count meets the cap", () => {
+    const r = checkQuota("FREE", "articlesPerMonth", 3);
+    assert.equal(r.ok, false);
+    if (!r.ok) {
+      assert.equal(r.reason, "PLAN_LIMIT");
+      assert.equal(r.currentPlan, "FREE");
+      // Cheapest plan with > 3 articlesPerMonth is INDIVIDUAL (50).
+      assert.equal(r.suggestedPlan, "INDIVIDUAL");
+      assert.match(r.message, /articles this month/);
+    }
+  });
+
+  it("treats unlimited (-1) plans as POSITIVE_INFINITY", () => {
+    const r = checkQuota("ENTERPRISE", "articlesPerMonth", 999_999);
+    assert.equal(r.ok, true);
+    if (r.ok) assert.equal(r.limit, Number.POSITIVE_INFINITY);
+  });
+
+  it("planLimitFromQuota envelope carries the canonical fields", () => {
+    const check = checkQuota("FREE", "users", 1);
+    assert.equal(check.ok, false);
+    if (check.ok) return;
+    const env = planLimitFromQuota(check);
+    assert.equal(env.code, "PLAN_LIMIT");
+    assert.equal(env.upgrade, true);
+    assert.equal(env.quota, "users");
+    assert.equal(env.used, 1);
+    assert.equal(env.limit, 1);
+  });
+});
+
+describe("checkPlatforms", () => {
+  it("partitions requested platforms into allowed/blocked subsets", () => {
+    // FREE has only CHATGPT in the default matrix.
+    const r = checkPlatforms("FREE", ["CHATGPT", "CLAUDE", "GEMINI"]);
+    assert.deepEqual(r.allowed, ["CHATGPT"]);
+    assert.deepEqual(r.blocked, ["CLAUDE", "GEMINI"]);
+  });
+
+  it("returns empty blocked list when the plan covers everything", () => {
+    const r = checkPlatforms("ENTERPRISE", ["CHATGPT", "CLAUDE", "PERPLEXITY"]);
+    assert.deepEqual(r.blocked, []);
+    assert.deepEqual(r.allowed, ["CHATGPT", "CLAUDE", "PERPLEXITY"]);
+  });
+});
+
+describe("featureMatrix", () => {
+  it("exposes every plan with all the keys the spec calls for", () => {
+    for (const plan of PLAN_ORDER) {
+      const row = featureMatrix[plan];
+      assert.ok(row, `missing matrix row for ${plan}`);
+      // Spot-check the keys §6 of the spec enumerates.
+      assert.equal(typeof row.articlesPerMonth, "number");
+      assert.equal(typeof row.promptsTracked, "number");
+      assert.equal(typeof row.users, "number");
+      assert.equal(typeof row.api, "boolean");
+      assert.equal(typeof row.chatsonic, "boolean");
+      assert.equal(typeof row.sso, "boolean");
+      assert.ok(Array.isArray(row.platforms));
+    }
   });
 });

@@ -120,6 +120,135 @@ export async function addTopUpCredits(args: {
   amount: number;
   reason: string;
 }): Promise<{ balanceAfter: number } | null> {
+  return creditCredits(args);
+}
+
+// ---------------------------------------------------------------------------
+// Spec-named public API (08-billing-and-credits.md §5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Typed error raised by {@link debitCredits} when the workspace
+ * doesn't have enough credits to cover the request. The article
+ * pipeline and LLM router both raise an identical class from their
+ * own modules; we re-export this one as the canonical type so callers
+ * (server actions, route handlers) can catch a single error.
+ */
+export class InsufficientCreditsError extends Error {
+  readonly code = "INSUFFICIENT_CREDITS";
+  constructor(
+    public readonly workspaceId: string,
+    public readonly required: number,
+    public readonly balance: number,
+  ) {
+    super(
+      `Insufficient credits: ${workspaceId} has ${balance}, needs ${required}`,
+    );
+    this.name = "InsufficientCreditsError";
+  }
+}
+
+/**
+ * Read-only balance lookup. Pure read, no transaction — callers that
+ * need a race-free check should use {@link debitCredits} instead.
+ */
+export async function currentBalance(workspaceId: string): Promise<number> {
+  const ws = await db.workspace.findUnique({
+    where: { id: workspaceId },
+    select: { creditBalance: true },
+  });
+  return ws?.creditBalance ?? 0;
+}
+
+/**
+ * Atomically debit credits and write a ledger entry.
+ *
+ * Implementation notes:
+ *   - Single Postgres transaction. The guarded `updateMany` (with a
+ *     balance ≥ amount predicate) means concurrent debits race on
+ *     the row lock; only one sees `count === 1`, the rest throw
+ *     {@link InsufficientCreditsError}.
+ *   - The ledger row's `balanceAfter` is read inside the same txn
+ *     so the audit trail can never disagree with the live balance.
+ *   - Enterprise plans bypass the debit but still record the ledger
+ *     row for usage reporting (delta 0 against unlimited balance).
+ */
+export async function debitCredits(args: {
+  workspaceId: string;
+  amount: number;
+  reason: string;
+}): Promise<{ balanceAfter: number }> {
+  if (args.amount <= 0) {
+    throw new Error(`debitCredits: amount must be positive, got ${args.amount}`);
+  }
+
+  return db.$transaction(async (tx) => {
+    const ws = await tx.workspace.findUnique({
+      where: { id: args.workspaceId },
+      select: { creditBalance: true, plan: true },
+    });
+    if (!ws) {
+      throw new Error(`debitCredits: workspace ${args.workspaceId} not found`);
+    }
+
+    if (ws.plan === "ENTERPRISE") {
+      // Heartbeat ledger row so the usage chart on /billing still
+      // reflects work happening, but we don't decrement.
+      await tx.creditLedger.create({
+        data: {
+          workspaceId: args.workspaceId,
+          delta: 0,
+          reason: `${args.reason}:enterprise`,
+          balanceAfter: ws.creditBalance,
+        },
+      });
+      return { balanceAfter: ws.creditBalance };
+    }
+
+    const result = await tx.workspace.updateMany({
+      where: {
+        id: args.workspaceId,
+        creditBalance: { gte: args.amount },
+      },
+      data: { creditBalance: { decrement: args.amount } },
+    });
+    if (result.count === 0) {
+      throw new InsufficientCreditsError(
+        args.workspaceId,
+        args.amount,
+        ws.creditBalance,
+      );
+    }
+    const after = await tx.workspace.findUnique({
+      where: { id: args.workspaceId },
+      select: { creditBalance: true },
+    });
+    const balanceAfter = after?.creditBalance ?? 0;
+    await tx.creditLedger.create({
+      data: {
+        workspaceId: args.workspaceId,
+        delta: -args.amount,
+        reason: args.reason,
+        balanceAfter,
+      },
+    });
+    return { balanceAfter };
+  });
+}
+
+/**
+ * Additive credit grant. Used for refunds, manual adjustments, and
+ * one-time top-ups (which is why {@link addTopUpCredits} above is now
+ * just a re-export of this function).
+ *
+ * Distinct from {@link grantMonthlyCredits}, which RESETS the balance
+ * to the plan's monthly allowance.
+ */
+export async function creditCredits(args: {
+  workspaceId: string;
+  amount: number;
+  reason: string;
+}): Promise<{ balanceAfter: number } | null> {
   if (args.amount <= 0) return null;
   return db.$transaction(async (tx) => {
     const ws = await tx.workspace.findUnique({

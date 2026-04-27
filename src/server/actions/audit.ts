@@ -24,6 +24,7 @@ import { UnsafeUrlError, safeFetch } from "@/lib/seo/ssrf";
 import { altBudgetForPlan } from "@/lib/seo/alt-budget";
 import { flattenZodError } from "@/lib/validation";
 import { planQuota } from "@/config/plans";
+import { checkQuota } from "@/lib/billing/gates";
 import { safeHttpUrl } from "@/lib/utils";
 import type { Plan } from "@prisma/client";
 
@@ -52,8 +53,12 @@ export type ActionResult<T = undefined> =
         | "VALIDATION"
         | "RATE_LIMIT"
         | "QUOTA"
+        | "PLAN_LIMIT"
         | "SERVER"
         | "INSUFFICIENT_CREDITS";
+      upgrade?: true;
+      currentPlan?: Plan;
+      suggestedPlan?: Plan;
     };
 
 function fail(e: unknown): ActionResult<never> {
@@ -109,24 +114,25 @@ export async function runAuditAction(
 
     // Monthly quota enforcement. We count AuditRuns created this calendar
     // month against `siteAuditsPerMonth` for the workspace's plan.
-    const quota = planQuota(workspace.plan, "siteAuditsPerMonth");
-    if (Number.isFinite(quota)) {
-      const start = new Date();
-      start.setUTCDate(1);
-      start.setUTCHours(0, 0, 0, 0);
-      const used = await db.auditRun.count({
-        where: {
-          project: { workspaceId: workspace.id },
-          createdAt: { gte: start },
-        },
-      });
-      if (used >= quota) {
-        return {
-          ok: false,
-          error: `Monthly audit limit reached (${quota}). Upgrade your plan for more.`,
-          code: "QUOTA",
-        };
-      }
+    const start = new Date();
+    start.setUTCDate(1);
+    start.setUTCHours(0, 0, 0, 0);
+    const used = await db.auditRun.count({
+      where: {
+        project: { workspaceId: workspace.id },
+        createdAt: { gte: start },
+      },
+    });
+    const gate = checkQuota(workspace.plan, "siteAuditsPerMonth", used);
+    if (!gate.ok) {
+      return {
+        ok: false,
+        error: gate.message,
+        code: "PLAN_LIMIT",
+        upgrade: true,
+        currentPlan: gate.currentPlan,
+        suggestedPlan: gate.suggestedPlan,
+      };
     }
 
     // `maxPages` is the lesser of the plan cap and what the user requested.

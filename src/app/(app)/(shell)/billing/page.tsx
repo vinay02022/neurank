@@ -31,7 +31,8 @@ export default async function Page() {
   const stripeConfigured = isStripeConfigured();
   const [usage, ledger, invoices] = await Promise.all([
     getUsageSnapshot(workspace.id),
-    listRecentLedger(workspace.id, 30),
+    // Spec §8: "Credit ledger table (last 50 entries)".
+    listRecentLedger(workspace.id, 50),
     listInvoices(snapshot.stripeCustomerId, 10),
   ]);
 
