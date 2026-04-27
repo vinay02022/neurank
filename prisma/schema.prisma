@@ -37,6 +37,21 @@ model Workspace {
   creditBalance        Int       @default(50)
   stripeCustomerId     String?   @unique
   stripeSubscriptionId String?   @unique
+  // Stripe price ID currently active. Persisted alongside `plan` so we
+  // can disambiguate monthly vs. yearly billing of the same tier
+  // without hitting Stripe on every render.
+  stripePriceId        String?
+  // Mirrors Stripe's subscription.status — kept locally so the billing
+  // page can render trial/past_due/canceled banners synchronously.
+  subscriptionStatus   String?
+  // Period end is the source of truth for "next renewal" copy; we
+  // refresh it on every subscription.* webhook event.
+  currentPeriodEnd     DateTime?
+  cancelAtPeriodEnd    Boolean   @default(false)
+  // Set when an `invoice.payment_succeeded` event is processed for the
+  // subscription's renewal so the monthly credit grant is idempotent
+  // even if Stripe re-delivers the same event.
+  lastCreditGrantAt    DateTime?
   trialEndsAt          DateTime?
   createdAt            DateTime  @default(now())
   updatedAt            DateTime  @updatedAt
@@ -50,6 +65,7 @@ model Workspace {
   llmEvents           LLMEvent[]
   auditLogs           AuditLog[]
   creditLedger        CreditLedger[]
+  billingEvents       BillingEvent[]
   wordpressCredential WordPressCredential?
 }
 
@@ -629,4 +645,22 @@ model CreditLedger {
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@index([workspaceId, createdAt])
+}
+
+// Stripe events we've processed. Stripe re-delivers events whenever
+// our endpoint returns a non-2xx (or a 2xx that times out), so every
+// handler MUST gate on this row to stay idempotent. We persist the
+// raw event id as the primary key so unique-constraint violations
+// double as the "already processed" check.
+model BillingEvent {
+  id              String   @id // Stripe event id (e.g. evt_123)
+  workspaceId     String?
+  type            String
+  payload         Json
+  processedAt     DateTime @default(now())
+
+  workspace Workspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, processedAt])
+  @@index([type])
 }
