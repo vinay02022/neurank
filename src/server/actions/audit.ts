@@ -307,6 +307,12 @@ async function draftPatch(args: DraftArgs): Promise<Omit<AutoFixPatch, "issueId"
   switch (args.checkId) {
     case "meta.title.missing":
     case "meta.title.too_long":
+    // Duplicate-title fixes use the same prompt as `missing` — the
+    // page already has a title, but we want a NEW unique one written
+    // from the page content, so the LLM context is identical. We
+    // tell `draftTitle` to phrase the diff as "before/after" rather
+    // than "missing/proposed" through the args.checkId switch below.
+    case "meta.title.duplicate":
       return draftTitle(args);
     case "meta.description.missing":
     case "meta.description.too_long":
@@ -317,6 +323,8 @@ async function draftPatch(args: DraftArgs): Promise<Omit<AutoFixPatch, "issueId"
       return draftCanonical(args);
     case "schema.missing":
       return draftSchema(args);
+    case "geo.structured_faq.missing":
+      return draftFaqSchema(args);
     case "img.alt.missing":
       return draftAlt(args);
     default:
@@ -327,11 +335,14 @@ async function draftPatch(args: DraftArgs): Promise<Omit<AutoFixPatch, "issueId"
 async function draftTitle(args: DraftArgs) {
   const context = await fetchPageExcerpt(args.issueUrl);
   const schema = z.object({ title: z.string().min(5).max(80) });
+  const isDuplicate = args.checkId === "meta.title.duplicate";
+  const system = isDuplicate
+    ? "You are an SEO copywriter. Several pages on this site share the SAME <title>, which forces them to compete in search. Produce a NEW concise, keyword-rich <title> (≤ 60 chars) that uniquely reflects THIS page's primary intent so it ranks distinctly from its siblings."
+    : "You are an SEO copywriter. Produce a concise, keyword-rich <title> (≤ 60 chars) that reflects the page's primary intent. Do not include the brand name unless it adds clarity.";
   const result = await generate({
     workspaceId: args.workspaceId,
     task: "seo:metafix",
-    system:
-      "You are an SEO copywriter. Produce a concise, keyword-rich <title> (≤ 60 chars) that reflects the page's primary intent. Do not include the brand name unless it adds clarity.",
+    system,
     prompt: buildTitlePrompt(args, context),
     schema,
     temperature: 0.3,
@@ -340,11 +351,12 @@ async function draftTitle(args: DraftArgs) {
   const title = parsed?.title.trim() ?? "";
   return {
     checkId: args.checkId,
-    title: "Proposed <title>",
-    before: "(missing)",
+    title: isDuplicate ? "Proposed unique <title>" : "Proposed <title>",
+    before: isDuplicate ? "(shared with other pages)" : "(missing)",
     after: `<title>${escapeHtml(title)}</title>`,
-    instructions:
-      "Copy this tag into the <head> of the page. Deploy, then mark the issue as fixed in Neurank.",
+    instructions: isDuplicate
+      ? "Copy this tag into the <head> of THIS page only — leave the other pages' titles untouched until you re-run the audit and confirm the duplicate is resolved."
+      : "Copy this tag into the <head> of the page. Deploy, then mark the issue as fixed in Neurank.",
   };
 }
 
@@ -463,6 +475,88 @@ async function draftSchema(args: DraftArgs) {
     instructions:
       "Paste inside <head>. Validate with Google's Rich Results Test before deploying.",
   };
+}
+
+/**
+ * FAQPage JSON-LD generator. Used when a question-heavy page has no
+ * FAQPage schema. We pull a longer excerpt than the meta-fix recipes
+ * because the LLM needs enough surrounding prose to identify the
+ * actual Q-A pairs. The output is constrained to 1–10 pairs so the
+ * returned JSON-LD stays under the 3 KB envelope our diff dialog
+ * renders cleanly.
+ */
+async function draftFaqSchema(args: DraftArgs) {
+  const context = await fetchPageExcerpt(args.issueUrl);
+  const schema = z.object({
+    faqs: z
+      .array(
+        z.object({
+          question: z.string().min(5).max(240),
+          answer: z.string().min(10).max(800),
+        }),
+      )
+      .min(1)
+      .max(10),
+  });
+  const result = await generate({
+    workspaceId: args.workspaceId,
+    task: "seo:metafix",
+    system:
+      "You extract FAQ pairs from a web page so they can be emitted as schema.org FAQPage JSON-LD. Each question must be a verbatim or near-verbatim question the page actually answers. Each answer must be ≤ 600 characters, factual, and grounded in the supplied excerpt — do not invent answers the page doesn't support.",
+    prompt: buildFaqPrompt(args, context),
+    schema,
+    temperature: 0.2,
+    maxTokens: 1_500,
+  });
+  const parsed = result.object as
+    | { faqs: { question: string; answer: string }[] }
+    | undefined;
+  const faqs = parsed?.faqs ?? [];
+
+  if (faqs.length === 0) {
+    return {
+      checkId: args.checkId,
+      title: "No FAQ pairs detected",
+      before: "(no FAQPage schema)",
+      after: "(could not extract Q-A pairs from page text)",
+      instructions:
+        "We couldn't pull clear FAQ pairs from the page. Add 3+ explicit question headings (e.g. \"How do I…?\") and re-run the audit.",
+    };
+  }
+
+  const jsonLd = {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    mainEntity: faqs.map((f) => ({
+      "@type": "Question",
+      name: f.question.trim(),
+      acceptedAnswer: {
+        "@type": "Answer",
+        text: f.answer.trim(),
+      },
+    })),
+  };
+  const rendered = JSON.stringify(jsonLd, null, 2);
+
+  return {
+    checkId: args.checkId,
+    title: `Proposed FAQPage JSON-LD (${faqs.length} pair${faqs.length === 1 ? "" : "s"})`,
+    before: "(no FAQPage schema)",
+    after: `<script type="application/ld+json">\n${rendered}\n</script>`,
+    instructions:
+      "Paste this <script> tag inside <head>. Validate with Google's Rich Results Test before deploying — Google will only render rich-result FAQs if every question on the page also appears in the JSON-LD.",
+  };
+}
+
+function buildFaqPrompt(args: DraftArgs, context: string): string {
+  return [
+    `Page URL: ${args.issueUrl}`,
+    `Brand: ${args.brandName ?? args.projectDomain}`,
+    "Page text excerpt (extract Q-A pairs strictly from this, do not invent):",
+    context,
+    "",
+    'Return { faqs: { question: string, answer: string }[] }. Cap at 10 pairs.',
+  ].join("\n");
 }
 
 async function draftAlt(args: DraftArgs) {

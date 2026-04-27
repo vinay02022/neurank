@@ -37,6 +37,21 @@ model Workspace {
   creditBalance        Int       @default(50)
   stripeCustomerId     String?   @unique
   stripeSubscriptionId String?   @unique
+  // Stripe price ID currently active. Persisted alongside `plan` so we
+  // can disambiguate monthly vs. yearly billing of the same tier
+  // without hitting Stripe on every render.
+  stripePriceId        String?
+  // Mirrors Stripe's subscription.status — kept locally so the billing
+  // page can render trial/past_due/canceled banners synchronously.
+  subscriptionStatus   String?
+  // Period end is the source of truth for "next renewal" copy; we
+  // refresh it on every subscription.* webhook event.
+  currentPeriodEnd     DateTime?
+  cancelAtPeriodEnd    Boolean   @default(false)
+  // Set when an `invoice.payment_succeeded` event is processed for the
+  // subscription's renewal so the monthly credit grant is idempotent
+  // even if Stripe re-delivers the same event.
+  lastCreditGrantAt    DateTime?
   trialEndsAt          DateTime?
   createdAt            DateTime  @default(now())
   updatedAt            DateTime  @updatedAt
@@ -50,6 +65,7 @@ model Workspace {
   llmEvents           LLMEvent[]
   auditLogs           AuditLog[]
   creditLedger        CreditLedger[]
+  billingEvents       BillingEvent[]
   wordpressCredential WordPressCredential?
 }
 
@@ -383,8 +399,9 @@ model BrandVoice {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  articles  Article[]
+  workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  articles    Article[]
+  chatThreads ChatThread[]
 
   @@index([workspaceId])
   @@index([workspaceId, isDefault])
@@ -486,19 +503,34 @@ enum ArticleStatus {
 // ============================================================
 
 model ChatThread {
-  id          String   @id @default(cuid())
-  workspaceId String
-  userId      String
-  title       String   @default("Untitled chat")
-  model       String   @default("gpt-4o-mini")
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id           String      @id @default(cuid())
+  workspaceId  String
+  userId       String
+  title        String      @default("Untitled chat")
+  model        String      @default("gpt-4o-mini")
+  // Optional brand-voice attached to a thread; messages composed in
+  // this thread inherit the voice's tone profile until the user
+  // detaches it (via the `/brand-voice` slash command).
+  brandVoiceId String?
+  // User-pinned threads sort to the top of the list. We keep this as
+  // a plain bool with a composite index so the thread list query is a
+  // single sorted scan rather than UNION ALL.
+  pinned       Boolean     @default(false)
+  // Soft-delete: deletedAt non-null hides the thread from the list
+  // but keeps message history queryable for audit / restore. Hard
+  // delete happens via a periodic job (see Phase 09 polish).
+  deletedAt    DateTime?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
 
-  workspace Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  messages  ChatMessage[]
+  workspace  Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user       User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  brandVoice BrandVoice?   @relation(fields: [brandVoiceId], references: [id], onDelete: SetNull)
+  messages   ChatMessage[]
 
   @@index([workspaceId, userId])
+  @@index([workspaceId, userId, pinned, updatedAt])
+  @@index([workspaceId, deletedAt])
 }
 
 model ChatMessage {
@@ -613,4 +645,22 @@ model CreditLedger {
   workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 
   @@index([workspaceId, createdAt])
+}
+
+// Stripe events we've processed. Stripe re-delivers events whenever
+// our endpoint returns a non-2xx (or a 2xx that times out), so every
+// handler MUST gate on this row to stay idempotent. We persist the
+// raw event id as the primary key so unique-constraint violations
+// double as the "already processed" check.
+model BillingEvent {
+  id              String   @id // Stripe event id (e.g. evt_123)
+  workspaceId     String?
+  type            String
+  payload         Json
+  processedAt     DateTime @default(now())
+
+  workspace Workspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, processedAt])
+  @@index([type])
 }

@@ -42,6 +42,7 @@ function memoryLimit(key: string, limit: number, windowMs: number) {
 
 type LimiterName =
   | "webhook:clerk"
+  | "webhook:stripe"
   | "auth:signup"
   | "onboarding"
   | "api:default"
@@ -53,10 +54,14 @@ type LimiterName =
   | "article:regenerate"
   | "article:publish"
   | "brand-voice:train"
-  | "api:articles";
+  | "api:articles"
+  | "chat:send"
+  | "chat:upload"
+  | "chat:search";
 
 const LIMITS: Record<LimiterName, { limit: number; windowSec: number }> = {
   "webhook:clerk": { limit: 120, windowSec: 60 },
+  "webhook:stripe": { limit: 300, windowSec: 60 },
   "auth:signup": { limit: 10, windowSec: 60 },
   "onboarding": { limit: 30, windowSec: 60 },
   "api:default": { limit: 60, windowSec: 60 },
@@ -92,6 +97,16 @@ const LIMITS: Record<LimiterName, { limit: number; windowSec: number }> = {
   // Public article API — keyed by API key string so one noisy
   // integration can't starve the rest of a workspace's keys.
   "api:articles": { limit: 60, windowSec: 60 * 60 },
+  // Chat send: roughly one message every two seconds per user, with
+  // headroom for typing-then-sending bursts. Real cost is gated by
+  // creditBalance + per-token debit in chat-stream.ts.
+  "chat:send": { limit: 60, windowSec: 60 },
+  // File uploads are heavier (extractor + storage). Lower cap.
+  "chat:upload": { limit: 20, windowSec: 60 },
+  // Web-search tool calls inside chat. Same envelope as chat:send;
+  // tools are dispatched by the model so a runaway agent can't pin
+  // the search provider with thousands of calls per minute.
+  "chat:search": { limit: 60, windowSec: 60 },
 };
 
 const redisLimiters = new Map<LimiterName, Ratelimit>();

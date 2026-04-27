@@ -1,16 +1,15 @@
 import { MessagesSquare } from "lucide-react";
 
-import { ComingSoon } from "@/components/app/coming-soon";
+import { ChatEmptyState } from "@/components/chat/chat-empty-state";
 
 export const metadata = { title: "Chatsonic" };
 
-export default function Page() {
-  return (
-    <ComingSoon
-      icon={MessagesSquare}
-      phase="Phase 07"
-      title="Chatsonic"
-      description="Multi-LLM chat with model picker, tool toggles, canvas and citations."
-    />
-  );
+/**
+ * Empty state shown when no thread is selected. The persistent
+ * sidebar (in `layout.tsx`) lets the user pick an existing thread
+ * or hit the "New chat" affordance which calls `createThreadAction`
+ * and routes to `/chat/[threadId]`.
+ */
+export default function ChatIndexPage() {
+  return <ChatEmptyState icon={MessagesSquare} />;
 }
