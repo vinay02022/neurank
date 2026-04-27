@@ -1,9 +1,12 @@
-import "server-only";
-
 import { createHash, randomBytes } from "node:crypto";
 
 /**
  * Invite token primitives.
+ *
+ * Intentionally NOT marked `"server-only"` - the module is pure
+ * (no secrets, no DB) so unit tests can import it. The functions
+ * still rely on `node:crypto` which won't bundle into a client
+ * component anyway.
  *
  * The wire format is a 32-byte URL-safe base64 string. We store only
  * its SHA-256 hex hash; the raw token lives in the email/URL. That
