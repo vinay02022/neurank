@@ -22,6 +22,10 @@ import {
   createArticleDraftAction,
   generateArticleAction,
 } from "@/server/actions/article";
+import {
+  UpgradeDialog,
+  useUpgradeDialog,
+} from "@/components/billing/upgrade-dialog";
 
 type ArticleMode = "INSTANT" | "STEP_4" | "STEP_10";
 
@@ -73,6 +77,7 @@ const ARTICLE_TYPES = [
 
 export function ArticleWizard({ mode, voices }: Props) {
   const router = useRouter();
+  const upgrade = useUpgradeDialog();
   const [step, setStep] = React.useState(1);
   const [busy, setBusy] = React.useState(false);
 
@@ -129,12 +134,27 @@ export function ArticleWizard({ mode, voices }: Props) {
     });
     if (!draft.ok) {
       setBusy(false);
-      toast.error(draft.error);
+      if (
+        draft.code === "PLAN_LIMIT" &&
+        draft.currentPlan &&
+        draft.suggestedPlan
+      ) {
+        upgrade.present({
+          message: draft.error,
+          currentPlan: draft.currentPlan,
+          suggestedPlan: draft.suggestedPlan,
+          quota: "articlesPerMonth",
+        });
+      } else {
+        toast.error(draft.error);
+      }
       return;
     }
     const gen = await generateArticleAction({ articleId: draft.data.articleId });
     setBusy(false);
     if (!gen.ok) {
+      // generateArticleAction returns INSUFFICIENT_CREDITS / RATE_LIMIT,
+      // not PLAN_LIMIT — credit gating is by ledger, not feature flag.
       toast.error(gen.error);
       router.push(`/content/articles/${draft.data.articleId}`);
       return;
@@ -213,6 +233,7 @@ export function ArticleWizard({ mode, voices }: Props) {
           </Button>
         )}
       </div>
+      <UpgradeDialog {...upgrade.dialogProps} />
     </div>
   );
 }

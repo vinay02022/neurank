@@ -13,8 +13,9 @@ import {
 import { db } from "@/lib/db";
 import { flattenZodError } from "@/lib/validation";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { PLANS } from "@/config/plans";
+import { checkQuota } from "@/lib/billing/gates";
 import { appOrigin } from "@/lib/app-url";
+import type { Plan } from "@prisma/client";
 import { isEmailConfigured, sendEmail } from "@/lib/email";
 import {
   createInviteToken,
@@ -53,10 +54,14 @@ export type ActionResult<T = undefined> =
         | "FORBIDDEN"
         | "VALIDATION"
         | "QUOTA"
+        | "PLAN_LIMIT"
         | "NOT_FOUND"
         | "EXPIRED"
         | "RATE_LIMITED"
         | "SERVER";
+      upgrade?: true;
+      currentPlan?: Plan;
+      suggestedPlan?: Plan;
     };
 
 const ROLE_POWER: Record<Role, number> = { OWNER: 3, ADMIN: 2, MEMBER: 1 };
@@ -159,21 +164,23 @@ export async function inviteMemberAction(
     // Seat enforcement. Members + pending invites both count toward
     // the cap so a workspace can't queue up unlimited invitations
     // and cherry-pick once the seats free up.
-    const seatCap = PLANS[workspace.plan].users;
-    if (seatCap !== -1) {
-      const [memberCount, pendingCount] = await Promise.all([
-        db.membership.count({ where: { workspaceId: workspace.id } }),
-        db.workspaceInvite.count({
-          where: { workspaceId: workspace.id, status: "PENDING" },
-        }),
-      ]);
-      if (memberCount + pendingCount >= seatCap) {
-        return {
-          ok: false,
-          error: `Plan ${workspace.plan} is limited to ${seatCap} seat${seatCap === 1 ? "" : "s"}. Upgrade to invite more.`,
-          code: "QUOTA",
-        };
-      }
+    const [memberCount, pendingCount] = await Promise.all([
+      db.membership.count({ where: { workspaceId: workspace.id } }),
+      db.workspaceInvite.count({
+        where: { workspaceId: workspace.id, status: "PENDING" },
+      }),
+    ]);
+    const used = memberCount + pendingCount;
+    const seatGate = checkQuota(workspace.plan, "users", used);
+    if (!seatGate.ok) {
+      return {
+        ok: false,
+        error: seatGate.message,
+        code: "PLAN_LIMIT",
+        upgrade: true,
+        currentPlan: seatGate.currentPlan,
+        suggestedPlan: seatGate.suggestedPlan,
+      };
     }
 
     // Refuse if the email already belongs to a workspace member.
@@ -658,18 +665,23 @@ export async function acceptInviteAction(
     // past the cap silently. (We only count if the user isn't
     // already a member.)
     if (!existing) {
-      const seatCap = PLANS[invite.workspace.plan].users;
-      if (seatCap !== -1) {
-        const memberCount = await db.membership.count({
-          where: { workspaceId: invite.workspaceId },
-        });
-        if (memberCount >= seatCap) {
-          return {
-            ok: false,
-            error: `${invite.workspace.name} is full on its current plan.`,
-            code: "QUOTA",
-          };
-        }
+      const memberCount = await db.membership.count({
+        where: { workspaceId: invite.workspaceId },
+      });
+      const acceptGate = checkQuota(
+        invite.workspace.plan,
+        "users",
+        memberCount,
+      );
+      if (!acceptGate.ok) {
+        return {
+          ok: false,
+          error: `${invite.workspace.name} is full on its current plan.`,
+          code: "PLAN_LIMIT",
+          upgrade: true,
+          currentPlan: acceptGate.currentPlan,
+          suggestedPlan: acceptGate.suggestedPlan,
+        };
       }
     }
 

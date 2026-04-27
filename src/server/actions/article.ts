@@ -18,7 +18,8 @@ import {
 import { checkRateLimit } from "@/lib/rate-limit";
 import { InsufficientCreditsError, generate } from "@/lib/ai/router";
 import { flattenZodError } from "@/lib/validation";
-import { planQuota } from "@/config/plans";
+import { checkQuota } from "@/lib/billing/gates";
+import type { Plan } from "@prisma/client";
 import { ARTICLE_CREDIT_COST } from "@/config/article";
 import { slugify } from "@/lib/content/markdown";
 import { replaceSection, splitSections } from "@/lib/article/sections";
@@ -52,8 +53,13 @@ export type ActionResult<T = undefined> =
         | "VALIDATION"
         | "RATE_LIMIT"
         | "QUOTA"
+        | "PLAN_LIMIT"
         | "SERVER"
         | "INSUFFICIENT_CREDITS";
+      /** Set on PLAN_LIMIT to drive the `<UpgradeDialog>` in the wizard. */
+      upgrade?: true;
+      currentPlan?: Plan;
+      suggestedPlan?: Plan;
     };
 
 function fail(e: unknown): ActionResult<never> {
@@ -103,25 +109,26 @@ export async function createArticleDraftAction(
     // Quota enforcement. We count articles the workspace created this
     // calendar month that made it past DRAFT. The UI should already
     // be gating, but defence-in-depth for API / curl callers.
-    const quota = planQuota(workspace.plan, "articlesPerMonth");
-    if (Number.isFinite(quota)) {
-      const start = new Date();
-      start.setUTCDate(1);
-      start.setUTCHours(0, 0, 0, 0);
-      const used = await db.article.count({
-        where: {
-          workspaceId: workspace.id,
-          createdAt: { gte: start },
-          status: { in: ["GENERATING", "GENERATED", "PUBLISHED", "FAILED"] },
-        },
-      });
-      if (used >= quota) {
-        return {
-          ok: false,
-          error: `You've used ${used}/${quota} articles this month. Upgrade for more.`,
-          code: "QUOTA",
-        };
-      }
+    const start = new Date();
+    start.setUTCDate(1);
+    start.setUTCHours(0, 0, 0, 0);
+    const used = await db.article.count({
+      where: {
+        workspaceId: workspace.id,
+        createdAt: { gte: start },
+        status: { in: ["GENERATING", "GENERATED", "PUBLISHED", "FAILED"] },
+      },
+    });
+    const gate = checkQuota(workspace.plan, "articlesPerMonth", used);
+    if (!gate.ok) {
+      return {
+        ok: false,
+        error: gate.message,
+        code: "PLAN_LIMIT",
+        upgrade: true,
+        currentPlan: gate.currentPlan,
+        suggestedPlan: gate.suggestedPlan,
+      };
     }
 
     // Resolve brand voice — must belong to this workspace. If the
@@ -469,25 +476,26 @@ export async function createArticleFromCanvasAction(
     // articles since the LLM cost is borne by the chat per-token
     // ledger already, but undercounting quotas tends to cause hairy
     // billing surprises down the line — keep the rule symmetrical.
-    const quota = planQuota(workspace.plan, "articlesPerMonth");
-    if (Number.isFinite(quota)) {
-      const start = new Date();
-      start.setUTCDate(1);
-      start.setUTCHours(0, 0, 0, 0);
-      const used = await db.article.count({
-        where: {
-          workspaceId: workspace.id,
-          createdAt: { gte: start },
-          status: { in: ["GENERATING", "GENERATED", "PUBLISHED", "FAILED"] },
-        },
-      });
-      if (used >= quota) {
-        return {
-          ok: false,
-          error: `You've used ${used}/${quota} articles this month. Upgrade for more.`,
-          code: "QUOTA",
-        };
-      }
+    const start = new Date();
+    start.setUTCDate(1);
+    start.setUTCHours(0, 0, 0, 0);
+    const used = await db.article.count({
+      where: {
+        workspaceId: workspace.id,
+        createdAt: { gte: start },
+        status: { in: ["GENERATING", "GENERATED", "PUBLISHED", "FAILED"] },
+      },
+    });
+    const gate = checkQuota(workspace.plan, "articlesPerMonth", used);
+    if (!gate.ok) {
+      return {
+        ok: false,
+        error: gate.message,
+        code: "PLAN_LIMIT",
+        upgrade: true,
+        currentPlan: gate.currentPlan,
+        suggestedPlan: gate.suggestedPlan,
+      };
     }
 
     let brandVoiceId: string | undefined;
