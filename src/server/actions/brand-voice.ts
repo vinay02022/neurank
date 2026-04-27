@@ -13,7 +13,7 @@ import {
 import { db } from "@/lib/db";
 import { InsufficientCreditsError, generate } from "@/lib/ai/router";
 import { checkRateLimit } from "@/lib/rate-limit";
-import { UnsafeUrlError, assertSafeHttpUrl } from "@/lib/seo/ssrf";
+import { UnsafeUrlError, safeFetch } from "@/lib/seo/ssrf";
 import { planQuota } from "@/config/plans";
 import { flattenZodError } from "@/lib/validation";
 
@@ -281,12 +281,14 @@ async function fetchUrlSamples(urls: string[]): Promise<{ url: string; text: str
   const out: { url: string; text: string }[] = [];
   for (const raw of urls) {
     try {
-      const safe = await assertSafeHttpUrl(raw, { allowHttp: true });
-      const res = await fetch(safe, {
-        signal: AbortSignal.timeout(URL_FETCH_TIMEOUT_MS),
-        headers: {
-          "user-agent": "NeurankVoice/1.0 (+https://neurankk.io/bot)",
-          accept: "text/html",
+      const res = await safeFetch(raw, {
+        allowHttp: true,
+        init: {
+          signal: AbortSignal.timeout(URL_FETCH_TIMEOUT_MS),
+          headers: {
+            "user-agent": "NeurankVoice/1.0 (+https://neurankk.io/bot)",
+            accept: "text/html",
+          },
         },
       });
       if (!res.ok) continue;
@@ -300,7 +302,7 @@ async function fetchUrlSamples(urls: string[]): Promise<{ url: string; text: str
         .replace(/\s+/g, " ")
         .trim()
         .slice(0, URL_SAMPLE_BUDGET);
-      if (text.length > 400) out.push({ url: safe.toString(), text });
+      if (text.length > 400) out.push({ url: res.url, text });
     } catch {
       // skip unreachable / unsafe URL silently — the combined word
       // count check at the end surfaces insufficient material

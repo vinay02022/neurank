@@ -20,15 +20,19 @@ import { ARTICLE_CREDIT_COST } from "@/config/article";
  * The caller polls `GET /api/v1/articles/:id` to retrieve the
  * generated markdown once status reaches "GENERATED".
  *
- * Rate limit: `api:articles` — 60 requests/hour per API key so a
- * runaway integration can't drain a workspace's credits in seconds.
- * Monthly `articlesPerMonth` plan quota is enforced atop that.
+ * Rate limit: `api:articles:write` — 60 requests/hour per API key
+ * so a runaway integration can't drain a workspace's credits in
+ * seconds. Monthly `articlesPerMonth` plan quota is enforced atop
+ * that. The cheap status-poll endpoint (`GET /:id`) is on a
+ * separate `api:articles:read` budget so a polling client doesn't
+ * exhaust write headroom.
  *
- * Credit accounting mirrors the server-action path: flat 20 credits
- * debited here with `updateMany` predicate (race-safe), CreditLedger
- * row written, and the heavy pipeline runs via Inngest when
- * configured (else we 503 — we intentionally do NOT block on a
- * minutes-long inline job for a public HTTP caller).
+ * Credit accounting: the flat 20-credit debit, the GENERATING
+ * Article row, and the CreditLedger entry are committed in a SINGLE
+ * Postgres transaction so we cannot end up in a state where credits
+ * were taken but the article doesn't exist (or vice versa). If the
+ * subsequent Inngest dispatch fails, a separate refund transaction
+ * restores the balance and marks the article FAILED.
  */
 
 const bodySchema = z.object({
@@ -63,10 +67,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid API key." }, { status: 401 });
   }
 
-  const { success } = await checkRateLimit("api:articles", key.id);
+  const { success } = await checkRateLimit("api:articles:write", key.id);
   if (!success) {
     return NextResponse.json(
-      { error: "Rate limit exceeded — 60 requests/hour per API key." },
+      { error: "Rate limit exceeded — 60 generations/hour per API key." },
       { status: 429 },
     );
   }

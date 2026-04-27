@@ -20,7 +20,7 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { InsufficientCreditsError, generate } from "@/lib/ai/router";
 import { executeAudit } from "@/lib/seo/runner";
 import { findCheck } from "@/lib/seo/registry";
-import { UnsafeUrlError, assertSafeHttpUrl } from "@/lib/seo/ssrf";
+import { UnsafeUrlError, safeFetch } from "@/lib/seo/ssrf";
 import { altBudgetForPlan } from "@/lib/seo/alt-budget";
 import { flattenZodError } from "@/lib/validation";
 import { planQuota } from "@/config/plans";
@@ -704,21 +704,20 @@ const FIX_FETCH_UA = "NeurankBot/1.0 (+https://neurankk.io/bot)";
 async function fetchPageExcerpt(url: string): Promise<string> {
   const safe = safeHttpUrl(url);
   if (!safe) return "(no page content available)";
-  // Gate every LLM-grounding fetch through the SSRF guard. Unlike the
-  // user-facing optimizer we don't want to throw here — the auto-fix
-  // UX should still render a useful patch even if context grounding
-  // fails — so we swallow the UnsafeUrlError and return a placeholder.
-  try {
-    await assertSafeHttpUrl(safe, { allowHttp: true });
-  } catch {
-    return "(page host not allowed)";
-  }
+  // Gate every LLM-grounding fetch through `safeFetch` so each
+  // redirect hop is also re-validated. Unlike the user-facing
+  // optimizer we don't want to throw here — the auto-fix UX should
+  // still render a useful patch even if grounding fails — so we
+  // swallow UnsafeUrlError and return a placeholder.
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), 8_000);
   try {
-    const res = await fetch(safe, {
-      signal: ctrl.signal,
-      headers: { "user-agent": FIX_FETCH_UA, accept: "text/html" },
+    const res = await safeFetch(safe, {
+      allowHttp: true,
+      init: {
+        signal: ctrl.signal,
+        headers: { "user-agent": FIX_FETCH_UA, accept: "text/html" },
+      },
     });
     if (!res.ok) return "(page returned HTTP " + res.status + ")";
     const text = await res.text();
@@ -729,7 +728,8 @@ async function fetchPageExcerpt(url: string): Promise<string> {
       .replace(/\s+/g, " ")
       .trim()
       .slice(0, EXCERPT_BUDGET);
-  } catch {
+  } catch (err) {
+    if (err instanceof UnsafeUrlError) return "(page host not allowed)";
     return "(could not fetch page)";
   } finally {
     clearTimeout(t);
@@ -749,17 +749,15 @@ async function fetchPageForVision(
 ): Promise<{ excerpt: string; images: { src: string }[] }> {
   const safe = safeHttpUrl(url);
   if (!safe) return { excerpt: "(no page content available)", images: [] };
-  try {
-    await assertSafeHttpUrl(safe, { allowHttp: true });
-  } catch {
-    return { excerpt: "(page host not allowed)", images: [] };
-  }
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), 8_000);
   try {
-    const res = await fetch(safe, {
-      signal: ctrl.signal,
-      headers: { "user-agent": FIX_FETCH_UA, accept: "text/html" },
+    const res = await safeFetch(safe, {
+      allowHttp: true,
+      init: {
+        signal: ctrl.signal,
+        headers: { "user-agent": FIX_FETCH_UA, accept: "text/html" },
+      },
     });
     if (!res.ok) return { excerpt: `(page returned HTTP ${res.status})`, images: [] };
     const html = await res.text();
@@ -798,7 +796,10 @@ async function fetchPageForVision(
     });
 
     return { excerpt, images };
-  } catch {
+  } catch (err) {
+    if (err instanceof UnsafeUrlError) {
+      return { excerpt: "(page host not allowed)", images: [] };
+    }
     return { excerpt: "(could not fetch page)", images: [] };
   } finally {
     clearTimeout(t);

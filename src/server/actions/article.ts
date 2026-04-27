@@ -208,55 +208,63 @@ export async function generateArticleAction(
       );
     }
 
-    // Debit the flat cost up front. `updateMany` with a balance
-    // predicate gives us atomic-enough-in-postgres race safety — if
-    // two concurrent calls both pass the preflight read, exactly one
-    // UPDATE succeeds; the other one updates 0 rows and throws below.
-    const debited = await db.workspace.updateMany({
-      where: {
-        id: workspace.id,
-        creditBalance: { gte: ARTICLE_CREDIT_COST },
-      },
-      data: { creditBalance: { decrement: ARTICLE_CREDIT_COST } },
-    });
-    if (debited.count !== 1) {
-      throw new InsufficientCreditsError(workspace.id, ARTICLE_CREDIT_COST, 0);
-    }
-
-    // Mark the article as GENERATING and attach a ledger row so the
-    // billing page's "credits spent" total stays consistent.
-    // `balanceAfter` is fetched post-decrement — we accept a tiny
-    // read-your-write window between the updateMany above and this
-    // findUnique, but since no other path decrements credits within
-    // that window for the same workspace it's a non-issue in practice.
-    const post = await db.workspace.findUnique({
-      where: { id: workspace.id },
-      select: { creditBalance: true },
-    });
-    await db.$transaction([
-      db.article.update({
+    // Debit + status-flip + ledger row in a SINGLE Postgres
+    // transaction so we cannot leak a state where the workspace
+    // lost credits but no ArticleEvent / no ledger row exists. The
+    // `updateMany` with a balance predicate gives us race safety:
+    // if two concurrent calls both pass the preflight read, exactly
+    // one UPDATE matches a row; the other gets count=0 and aborts
+    // the txn. `creditsSpent: { increment }` removes the previous
+    // read-modify-write race on the article row itself.
+    await db.$transaction(async (tx) => {
+      const debited = await tx.workspace.updateMany({
+        where: {
+          id: workspace.id,
+          creditBalance: { gte: ARTICLE_CREDIT_COST },
+        },
+        data: { creditBalance: { decrement: ARTICLE_CREDIT_COST } },
+      });
+      if (debited.count !== 1) {
+        throw new InsufficientCreditsError(workspace.id, ARTICLE_CREDIT_COST, 0);
+      }
+      const ws = await tx.workspace.findUnique({
+        where: { id: workspace.id },
+        select: { creditBalance: true },
+      });
+      await tx.article.update({
         where: { id: article.id },
         data: {
           status: "GENERATING",
-          creditsSpent: article.creditsSpent + ARTICLE_CREDIT_COST,
+          creditsSpent: { increment: ARTICLE_CREDIT_COST },
           errorMessage: null,
         },
-      }),
-      db.creditLedger.create({
+      });
+      await tx.creditLedger.create({
         data: {
           workspaceId: workspace.id,
           delta: -ARTICLE_CREDIT_COST,
           reason: `article:generate:${article.id}`,
-          balanceAfter: post?.creditBalance ?? 0,
+          balanceAfter: ws?.creditBalance ?? 0,
         },
-      }),
-    ]);
+      });
+    });
 
     if (inngestIsConfigured()) {
-      await inngest.send({
-        name: "article/generate.requested",
-        data: { articleId: article.id, workspaceId: workspace.id },
-      });
+      try {
+        await inngest.send({
+          name: "article/generate.requested",
+          data: { articleId: article.id, workspaceId: workspace.id },
+        });
+      } catch (sendErr) {
+        // Couldn't enqueue. Refund + mark failed in a single txn so
+        // the user isn't stuck looking at a "GENERATING" spinner
+        // forever. We swallow refund errors and rethrow the
+        // original cause so the caller gets the real failure mode.
+        await refundArticle(workspace.id, article.id, "queue dispatch failed").catch(
+          (refundErr) => console.error("[article.action] refund failed", refundErr),
+        );
+        throw sendErr;
+      }
       revalidatePath(`/content/articles/${article.id}`);
       return { ok: true, data: { articleId: article.id, mode: "queued" } };
     }
@@ -272,6 +280,41 @@ export async function generateArticleAction(
   } catch (e) {
     return fail(e);
   }
+}
+
+/**
+ * Refund the flat article cost and mark the article FAILED. Used
+ * when we successfully debited but couldn't actually start the
+ * job (e.g. Inngest send failed, public-API dispatch raced).
+ */
+async function refundArticle(
+  workspaceId: string,
+  articleId: string,
+  reason: string,
+): Promise<void> {
+  await db.$transaction(async (tx) => {
+    const ws = await tx.workspace.update({
+      where: { id: workspaceId },
+      data: { creditBalance: { increment: ARTICLE_CREDIT_COST } },
+      select: { creditBalance: true },
+    });
+    await tx.article.update({
+      where: { id: articleId },
+      data: {
+        status: "FAILED",
+        errorMessage: reason,
+        creditsSpent: { decrement: ARTICLE_CREDIT_COST },
+      },
+    });
+    await tx.creditLedger.create({
+      data: {
+        workspaceId,
+        delta: ARTICLE_CREDIT_COST,
+        reason: `article:refund:${articleId}`,
+        balanceAfter: ws.creditBalance,
+      },
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------

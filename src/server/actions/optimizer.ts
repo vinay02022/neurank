@@ -14,7 +14,7 @@ import { safeHttpUrl } from "@/lib/utils";
 import { CHECKS } from "@/lib/seo/registry";
 import { dedupIssues } from "@/lib/seo/dedup";
 import { computeScore } from "@/lib/seo/score";
-import { UnsafeUrlError, assertSafeHttpUrl } from "@/lib/seo/ssrf";
+import { UnsafeUrlError, safeFetch } from "@/lib/seo/ssrf";
 import { flattenZodError } from "@/lib/validation";
 import type { AuditCategory, Severity } from "@prisma/client";
 import type { CrawledPage, RawIssue, SiteContext } from "@/lib/seo/types";
@@ -163,19 +163,20 @@ function toSingletonSite(page: CrawledPage): SiteContext {
 }
 
 async function fetchAndParse(url: string): Promise<CrawledPage | null> {
-  // SSRF guard — the optimizer accepts an arbitrary user-supplied URL,
-  // so this is the single most attackable fetch in the product. We
-  // let the thrown UnsafeUrlError bubble up so fail() can normalize it.
-  await assertSafeHttpUrl(url, { allowHttp: true });
+  // The optimizer accepts an arbitrary user-supplied URL — the single
+  // most attackable fetch in the product. `safeFetch` validates every
+  // redirect hop so a public origin can't bounce us to a private IP.
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch(url, {
-      signal: ctrl.signal,
-      redirect: "follow",
-      headers: {
-        "user-agent": "NeurankOptimizer/1.0 (+https://neurankk.io/bot)",
-        accept: "text/html",
+    const res = await safeFetch(url, {
+      allowHttp: true,
+      init: {
+        signal: ctrl.signal,
+        headers: {
+          "user-agent": "NeurankOptimizer/1.0 (+https://neurankk.io/bot)",
+          accept: "text/html",
+        },
       },
     });
     const contentType = res.headers.get("content-type") ?? "";

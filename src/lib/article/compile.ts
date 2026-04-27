@@ -6,6 +6,8 @@
 
 import { marked } from "marked";
 
+import { sanitizeArticleHtml } from "@/lib/content/sanitize";
+
 export interface FaqPair {
   question: string;
   answer: string;
@@ -49,7 +51,14 @@ export async function compileArticle(args: CompileArgs): Promise<CompileResult> 
     },
   );
 
-  const baseHtml = await marked.parse(withCites);
+  const baseHtmlRaw = await marked.parse(withCites);
+  // Sanitize the model-derived body BEFORE we splice in our own
+  // trusted JSON-LD `<script>` blocks. The sanitizer would strip
+  // those scripts otherwise — but the FAQ payload is fully
+  // controlled by us (escaped in `renderFaqJsonLd`) and is the
+  // single legitimate place a script tag may appear in published
+  // article HTML.
+  const baseHtml = sanitizeArticleHtml(baseHtmlRaw);
 
   const faqHtml = args.faqs.length ? renderFaqHtml(args.faqs) : "";
   const faqJsonLd = args.faqs.length ? renderFaqJsonLd(args.faqs) : "";

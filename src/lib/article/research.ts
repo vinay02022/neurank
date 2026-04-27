@@ -4,7 +4,7 @@ import { z } from "zod";
 import * as cheerio from "cheerio";
 
 import { generate } from "@/lib/ai/router";
-import { assertSafeHttpUrl } from "@/lib/seo/ssrf";
+import { assertSafeHttpUrl, safeFetch } from "@/lib/seo/ssrf";
 
 /**
  * Article research module.
@@ -132,10 +132,14 @@ async function fetchAndExtract(url: string): Promise<FetchedPage | null> {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch(url, {
-      signal: ctrl.signal,
-      redirect: "follow",
-      headers: { "user-agent": USER_AGENT, accept: "text/html" },
+    // Re-validate every redirect hop. Plain `fetch({redirect:"follow"})`
+    // would let an attacker-controlled origin bounce us to a private IP.
+    const res = await safeFetch(url, {
+      allowHttp: true,
+      init: {
+        signal: ctrl.signal,
+        headers: { "user-agent": USER_AGENT, accept: "text/html" },
+      },
     });
     if (!res.ok) return null;
     const ctype = res.headers.get("content-type") ?? "";

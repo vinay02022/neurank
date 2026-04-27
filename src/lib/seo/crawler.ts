@@ -2,7 +2,7 @@ import "server-only";
 
 import * as cheerio from "cheerio";
 
-import { assertSafeHttpUrl } from "./ssrf";
+import { safeFetch } from "./ssrf";
 import type { CrawledPage, SiteContext } from "./types";
 
 /**
@@ -448,18 +448,19 @@ async function fetchWithTimeout(
   url: string,
   ua: string,
 ): Promise<Response> {
-  // SSRF guard runs before every outbound hop. We intentionally do
-  // NOT cache the DNS result here — the crawler's request volume per
-  // host is low (≤ maxPages) and a fresh check on each URL is the
-  // conservative default. TOCTOU risk is documented in ssrf.ts.
-  await assertSafeHttpUrl(url, { allowHttp: true });
+  // `safeFetch` re-runs the SSRF guard on every redirect hop so an
+  // attacker-controlled origin can't return Location: 169.254.169.254
+  // and trick us into fetching internal resources on hop 2. Per-URL
+  // DNS volume is low (≤ maxPages), so we don't bother caching.
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), PER_REQUEST_TIMEOUT_MS);
   try {
-    return await fetch(url, {
-      redirect: "follow",
-      signal: ctrl.signal,
-      headers: { "user-agent": ua, accept: "text/html,application/xhtml+xml" },
+    return await safeFetch(url, {
+      allowHttp: true,
+      init: {
+        signal: ctrl.signal,
+        headers: { "user-agent": ua, accept: "text/html,application/xhtml+xml" },
+      },
     });
   } finally {
     clearTimeout(t);

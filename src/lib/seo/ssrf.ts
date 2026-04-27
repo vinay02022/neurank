@@ -125,6 +125,91 @@ export async function assertSafeHttpUrl(
 }
 
 /**
+ * Redirect-aware safe fetch.
+ *
+ * Native `fetch(url, { redirect: "follow" })` follows 3xx hops without
+ * giving us a chance to re-validate the resolved hostname. An attacker
+ * who controls a public origin can therefore bypass {@link assertSafeHttpUrl}
+ * on the *initial* URL by responding `Location: http://169.254.169.254/...`
+ * and pointing our server at a private resource on hop 2. This wrapper
+ * does manual redirect handling so every Location target is re-run
+ * through the SSRF guard before we issue the next hop.
+ *
+ * Method handling:
+ *   - 301/302: per RFC 7231 we MAY change to GET; native fetch does, so do we.
+ *   - 303: forced GET.
+ *   - 307/308: preserve method + body.
+ *   - We never resend the body when the method changes (Authorization
+ *     header is also stripped on cross-origin hops to avoid leaking
+ *     bearer tokens through redirects).
+ */
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+export interface SafeFetchOptions {
+  /** Allow http:// at every hop (default false). */
+  allowHttp?: boolean;
+  /** Max redirect hops to follow (default 5). */
+  maxHops?: number;
+  /** Forwarded to the underlying fetch on every hop. */
+  init?: RequestInit;
+}
+
+export async function safeFetch(
+  initialUrl: string | URL,
+  opts: SafeFetchOptions = {},
+): Promise<Response> {
+  const maxHops = opts.maxHops ?? 5;
+  const allowHttp = opts.allowHttp ?? false;
+  const startStr = typeof initialUrl === "string" ? initialUrl : initialUrl.toString();
+  let currentUrl = await assertSafeHttpUrl(startStr, { allowHttp });
+  let originForAuth = currentUrl.origin;
+
+  let method = (opts.init?.method ?? "GET").toUpperCase();
+  let body: RequestInit["body"] = opts.init?.body;
+  let headers = new Headers(opts.init?.headers ?? {});
+
+  for (let hop = 0; hop <= maxHops; hop += 1) {
+    const res = await fetch(currentUrl, {
+      ...opts.init,
+      method,
+      body,
+      headers,
+      redirect: "manual",
+    });
+    if (!REDIRECT_STATUSES.has(res.status)) return res;
+
+    const location = res.headers.get("location");
+    res.body?.cancel().catch(() => undefined);
+    if (!location) return res;
+    if (hop === maxHops) {
+      throw new UnsafeUrlError(`too many redirects (>${maxHops})`);
+    }
+
+    let nextUrlStr: string;
+    try {
+      nextUrlStr = new URL(location, currentUrl).toString();
+    } catch {
+      throw new UnsafeUrlError(`invalid redirect target: ${location}`);
+    }
+    const nextUrl = await assertSafeHttpUrl(nextUrlStr, { allowHttp });
+
+    if (nextUrl.origin !== originForAuth) {
+      headers.delete("authorization");
+      headers.delete("cookie");
+      originForAuth = nextUrl.origin;
+    }
+    if (res.status === 303 || (res.status === 301 || res.status === 302) && method !== "GET" && method !== "HEAD") {
+      method = "GET";
+      body = undefined;
+      headers.delete("content-length");
+      headers.delete("content-type");
+    }
+    currentUrl = nextUrl;
+  }
+  throw new UnsafeUrlError(`too many redirects (>${maxHops})`);
+}
+
+/**
  * Synchronous variant for callers that already have an IP literal or
  * want to make a best-effort check without incurring a DNS round-trip
  * (e.g. fast-path deny for the obviously bad inputs). Hostnames that

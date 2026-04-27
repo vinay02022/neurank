@@ -54,7 +54,8 @@ type LimiterName =
   | "article:regenerate"
   | "article:publish"
   | "brand-voice:train"
-  | "api:articles"
+  | "api:articles:write"
+  | "api:articles:read"
   | "chat:send"
   | "chat:upload"
   | "chat:search"
@@ -96,9 +97,14 @@ const LIMITS: Record<LimiterName, { limit: number; windowSec: number }> = {
   // Brand-voice training is an LLM extraction; capped per workspace
   // to prevent a single user from exhausting credits experimenting.
   "brand-voice:train": { limit: 20, windowSec: 60 * 60 },
-  // Public article API — keyed by API key string so one noisy
-  // integration can't starve the rest of a workspace's keys.
-  "api:articles": { limit: 60, windowSec: 60 * 60 },
+  // Public article API. We split write (POST /instant — kicks off
+  // a paid pipeline) from read (GET /:id — cheap status poll). 60
+  // writes/hour matches the in-app `article:generate` envelope; the
+  // read bucket is roomier so a polling integration that ticks every
+  // 5 s for the duration of generation doesn't also exhaust the
+  // write budget on the same key.
+  "api:articles:write": { limit: 60, windowSec: 60 * 60 },
+  "api:articles:read": { limit: 600, windowSec: 60 * 60 },
   // Chat send: roughly one message every two seconds per user, with
   // headroom for typing-then-sending bursts. Real cost is gated by
   // creditBalance + per-token debit in chat-stream.ts.
