@@ -42,6 +42,7 @@ function memoryLimit(key: string, limit: number, windowMs: number) {
 
 type LimiterName =
   | "webhook:clerk"
+  | "webhook:stripe"
   | "auth:signup"
   | "onboarding"
   | "api:default"
@@ -60,6 +61,7 @@ type LimiterName =
 
 const LIMITS: Record<LimiterName, { limit: number; windowSec: number }> = {
   "webhook:clerk": { limit: 120, windowSec: 60 },
+  "webhook:stripe": { limit: 300, windowSec: 60 },
   "auth:signup": { limit: 10, windowSec: 60 },
   "onboarding": { limit: 30, windowSec: 60 },
   "api:default": { limit: 60, windowSec: 60 },
