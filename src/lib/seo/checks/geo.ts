@@ -75,7 +75,7 @@ function structuredFaqMissing(): AuditCheck {
     id: "geo.structured_faq.missing",
     category: "GEO_READINESS",
     severity: "MEDIUM",
-    autoFixable: false,
+    autoFixable: true,
     description: "Question-heavy page lacks FAQPage schema",
     run: (page) => {
       if (page.status >= 400) return [];
@@ -97,7 +97,7 @@ function structuredFaqMissing(): AuditCheck {
           severity: "MEDIUM",
           url: page.url,
           message: `Page contains ${questions}+ question-style sentences but no FAQPage schema — add JSON-LD so AI answers can cite you directly.`,
-          autoFixable: false,
+          autoFixable: true,
         },
       ];
     },

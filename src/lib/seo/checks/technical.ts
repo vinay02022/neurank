@@ -69,7 +69,7 @@ function titleDuplicateSite(): AuditCheck {
     id: "meta.title.duplicate",
     category: "TECHNICAL",
     severity: "MEDIUM",
-    autoFixable: false,
+    autoFixable: true,
     description: "Title tag reused on multiple pages",
     runSite: (site) => {
       const byTitle = new Map<string, string[]>();
@@ -90,7 +90,7 @@ function titleDuplicateSite(): AuditCheck {
               severity: "MEDIUM",
               url: u,
               message: `Title is shared by ${urls.length} pages — each page should have a unique title.`,
-              autoFixable: false,
+              autoFixable: true,
             });
           }
         }
