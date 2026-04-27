@@ -12,6 +12,7 @@ import {
   normaliseStatus,
   planForCustomer,
 } from "@/lib/billing/subscription-status";
+import { creditWarningLevel } from "@/lib/billing/credit-warning";
 
 /**
  * Billing helpers are pure — env-driven price lookups, plan derivation,
@@ -118,6 +119,52 @@ describe("subscription helpers", () => {
     assert.equal(
       planForCustomer({ active: true, derived: null }),
       "FREE",
+    );
+  });
+});
+
+describe("creditWarningLevel", () => {
+  it("returns exhausted at zero balance regardless of plan", () => {
+    assert.equal(
+      creditWarningLevel({ plan: "GROWTH", creditBalance: 0 }),
+      "exhausted",
+    );
+    assert.equal(
+      creditWarningLevel({ plan: "FREE", creditBalance: -5 }),
+      "exhausted",
+    );
+  });
+
+  it("flags critical at <=10% remaining", () => {
+    // STARTER monthly grant is 3000.
+    assert.equal(
+      creditWarningLevel({ plan: "STARTER", creditBalance: 200 }),
+      "critical",
+    );
+    assert.equal(
+      creditWarningLevel({ plan: "STARTER", creditBalance: 300 }),
+      "critical",
+    );
+  });
+
+  it("flags low between 10% and 20%", () => {
+    assert.equal(
+      creditWarningLevel({ plan: "STARTER", creditBalance: 600 }),
+      "low",
+    );
+  });
+
+  it("returns ok above 20%", () => {
+    assert.equal(
+      creditWarningLevel({ plan: "STARTER", creditBalance: 2_500 }),
+      "ok",
+    );
+  });
+
+  it("returns ok for enterprise (unlimited grant)", () => {
+    assert.equal(
+      creditWarningLevel({ plan: "ENTERPRISE", creditBalance: 1 }),
+      "ok",
     );
   });
 });

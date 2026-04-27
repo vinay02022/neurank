@@ -1,9 +1,10 @@
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, Zap } from "lucide-react";
 
 import { SectionHeader } from "@/components/ui/section-header";
 import { getCurrentMembership } from "@/lib/auth";
 import { isStripeConfigured } from "@/lib/billing/stripe";
 import { listTopUps } from "@/lib/billing/prices";
+import { creditWarningLevel } from "@/lib/billing/credit-warning";
 import {
   getBillingSnapshot,
   getUsageSnapshot,
@@ -40,6 +41,11 @@ export default async function Page() {
     approxUsd: t.approxUsd,
   }));
 
+  const warning = creditWarningLevel({
+    plan: snapshot.plan,
+    creditBalance: snapshot.creditBalance,
+  });
+
   return (
     <div className="space-y-6">
       <SectionHeader
@@ -57,6 +63,38 @@ export default async function Page() {
               and the <code>STRIPE_PRICE_*</code> env vars to enable checkout. The
               page renders for inspection but actions will return a friendly
               error.
+            </div>
+          </div>
+        </div>
+      )}
+
+      {(warning === "low" || warning === "critical" || warning === "exhausted") && (
+        <div
+          className={`flex items-start gap-3 rounded-lg border p-3 text-sm ${
+            warning === "exhausted" || warning === "critical"
+              ? "border-destructive/40 bg-destructive/5"
+              : "border-amber-500/30 bg-amber-500/5"
+          }`}
+        >
+          <Zap
+            className={`mt-0.5 size-4 ${
+              warning === "exhausted" || warning === "critical"
+                ? "text-destructive"
+                : "text-amber-500"
+            }`}
+          />
+          <div>
+            <div className="font-medium">
+              {warning === "exhausted"
+                ? "You're out of credits"
+                : warning === "critical"
+                  ? "Running very low on credits"
+                  : "Credit balance is getting low"}
+            </div>
+            <div className="text-xs text-muted-foreground">
+              {warning === "exhausted"
+                ? "Article and audit runs will fail until you top up or upgrade your plan."
+                : "Top up below or move up a plan to keep things running smoothly."}
             </div>
           </div>
         </div>

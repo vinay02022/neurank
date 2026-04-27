@@ -131,6 +131,14 @@ export async function handleSubscriptionUpsert(
     (item as { current_period_end?: number | null } | undefined)?.current_period_end ??
     null;
 
+  // Read the current row so we can detect a plan transition and emit
+  // an audit-log row only when the change is meaningful — repeated
+  // identical webhook deliveries shouldn't spam the audit trail.
+  const before = await db.workspace.findUnique({
+    where: { id: ws.id },
+    select: { plan: true, subscriptionStatus: true, cancelAtPeriodEnd: true },
+  });
+
   await db.workspace.update({
     where: { id: ws.id },
     data: {
@@ -145,6 +153,30 @@ export async function handleSubscriptionUpsert(
       trialEndsAt: sub.trial_end ? new Date(sub.trial_end * 1000) : null,
     },
   });
+
+  if (
+    before &&
+    (before.plan !== plan ||
+      before.subscriptionStatus !== status ||
+      before.cancelAtPeriodEnd !== Boolean(sub.cancel_at_period_end))
+  ) {
+    await db.auditLog.create({
+      data: {
+        workspaceId: ws.id,
+        action: "billing.subscription_updated",
+        entity: "workspace",
+        entityId: ws.id,
+        metadata: {
+          fromPlan: before.plan,
+          toPlan: plan,
+          fromStatus: before.subscriptionStatus,
+          toStatus: status,
+          cancelAtPeriodEnd: Boolean(sub.cancel_at_period_end),
+          subscriptionId: sub.id,
+        },
+      },
+    });
+  }
 }
 
 export async function handleSubscriptionDeleted(
