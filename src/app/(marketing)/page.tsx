@@ -4,37 +4,7 @@ import { Button } from "@/components/ui/button";
 
 export default function HomePage() {
   return (
-    <main className="relative flex min-h-screen flex-col overflow-hidden">
-      {/* Nav */}
-      <header className="flex items-center justify-between px-6 py-5 md:px-10">
-        <Link href="/" className="flex items-center gap-2 font-semibold tracking-tight">
-          <span className="inline-flex size-7 items-center justify-center rounded-md bg-ai-gradient text-white">
-            <Sparkles className="size-4" />
-          </span>
-          <span className="text-lg">Neurank</span>
-        </Link>
-        <nav className="hidden items-center gap-7 text-sm text-muted-foreground md:flex">
-          <Link href="/pricing" className="hover:text-foreground">
-            Pricing
-          </Link>
-          <Link href="#features" className="hover:text-foreground">
-            Features
-          </Link>
-          <Link href="#geo" className="hover:text-foreground">
-            GEO
-          </Link>
-        </nav>
-        <div className="flex items-center gap-2">
-          <Button asChild variant="ghost" size="sm">
-            <Link href="/sign-in">Sign in</Link>
-          </Button>
-          <Button asChild variant="ai" size="sm">
-            <Link href="/sign-up">Get started free</Link>
-          </Button>
-        </div>
-      </header>
-
-      {/* Hero */}
+    <main className="flex flex-col">
       <section className="relative mx-auto flex w-full max-w-5xl flex-1 flex-col items-center justify-center px-6 pb-16 pt-20 text-center md:pt-28">
         <div className="pointer-events-none absolute inset-0 -z-10 [mask-image:radial-gradient(60%_50%_at_50%_40%,#000_40%,transparent)]">
           <div className="absolute left-1/2 top-24 h-[420px] w-[680px] -translate-x-1/2 rounded-full bg-ai-gradient opacity-20 blur-3xl" />
@@ -70,7 +40,6 @@ export default function HomePage() {
         </p>
       </section>
 
-      {/* Features strip */}
       <section id="features" className="mx-auto w-full max-w-6xl px-6 pb-28">
         <div className="grid gap-6 md:grid-cols-3">
           <FeatureCard
@@ -90,11 +59,6 @@ export default function HomePage() {
           />
         </div>
       </section>
-
-      {/* Footer */}
-      <footer className="border-t border-border px-6 py-6 text-center text-xs text-muted-foreground">
-        © {new Date().getFullYear()} Neurank, Inc.
-      </footer>
     </main>
   );
 }

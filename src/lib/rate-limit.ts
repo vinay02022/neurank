@@ -57,7 +57,9 @@ type LimiterName =
   | "api:articles"
   | "chat:send"
   | "chat:upload"
-  | "chat:search";
+  | "chat:search"
+  | "team:invite"
+  | "team:accept";
 
 const LIMITS: Record<LimiterName, { limit: number; windowSec: number }> = {
   "webhook:clerk": { limit: 120, windowSec: 60 },
@@ -107,6 +109,14 @@ const LIMITS: Record<LimiterName, { limit: number; windowSec: number }> = {
   // tools are dispatched by the model so a runaway agent can't pin
   // the search provider with thousands of calls per minute.
   "chat:search": { limit: 60, windowSec: 60 },
+  // Invites are sent by humans clicking "Send" - 30/hour is plenty
+  // for legit use and stops a compromised admin account from
+  // spamming arbitrary addresses with workspace-branded emails.
+  "team:invite": { limit: 30, windowSec: 60 * 60 },
+  // Accept is keyed on the raw token so brute-force attempts on the
+  // /invite/[token] page hit a cap quickly. The 256-bit token still
+  // makes guessing infeasible; this is defence in depth.
+  "team:accept": { limit: 20, windowSec: 60 },
 };
 
 const redisLimiters = new Map<LimiterName, Ratelimit>();

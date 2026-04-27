@@ -66,6 +66,7 @@ model Workspace {
   auditLogs           AuditLog[]
   creditLedger        CreditLedger[]
   billingEvents       BillingEvent[]
+  invites             WorkspaceInvite[]
   wordpressCredential WordPressCredential?
 }
 
@@ -96,6 +97,44 @@ enum Role {
   OWNER
   ADMIN
   MEMBER
+}
+
+// Pending workspace invitations. The DB never stores raw invite
+// tokens - we keep a SHA-256 hash and ship the raw token in the
+// invite URL/email. Stolen-DB scenarios can't replay invites without
+// the secret half of the link.
+model WorkspaceInvite {
+  id            String              @id @default(cuid())
+  workspaceId   String
+  // Email the invite was sent to. Lower-cased on write so dedupe
+  // logic + lookups stay consistent regardless of casing.
+  email         String
+  role          Role                @default(MEMBER)
+  // SHA-256 hex of the raw token. The raw token only exists in the
+  // invite link / email body and is never persisted.
+  tokenHash     String              @unique
+  status        WorkspaceInviteStatus @default(PENDING)
+  invitedById   String?
+  expiresAt     DateTime
+  acceptedAt    DateTime?
+  acceptedByUserId String?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  // One pending invite per (workspace, email). Re-inviting the same
+  // address rotates the token via upsert rather than creating a new
+  // row, so cleanup is implicit.
+  @@unique([workspaceId, email])
+  @@index([workspaceId, status])
+}
+
+enum WorkspaceInviteStatus {
+  PENDING
+  ACCEPTED
+  REVOKED
+  EXPIRED
 }
 
 model ApiKey {

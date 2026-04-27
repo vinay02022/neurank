@@ -51,22 +51,7 @@ export function stripe(): Stripe {
   return _client;
 }
 
-/**
- * Resolve the public-facing app origin for Checkout return URLs and
- * customer portal redirects. Order of precedence:
- *
- *   1. APP_URL (explicit override; what we want in production)
- *   2. NEXT_PUBLIC_APP_URL (used elsewhere in the codebase)
- *   3. VERCEL_URL (auto-set on Vercel preview deployments)
- *   4. http://localhost:3000 (dev fallback)
- */
-export function appOrigin(): string {
-  const direct = process.env.APP_URL ?? process.env.NEXT_PUBLIC_APP_URL;
-  if (direct) return stripTrailingSlash(direct);
-  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
-  return "http://localhost:3000";
-}
-
-function stripTrailingSlash(s: string): string {
-  return s.endsWith("/") ? s.slice(0, -1) : s;
-}
+// `appOrigin` lives in `@/lib/app-url` (no `server-only` so it's
+// importable from client components too). Re-exported here so the
+// existing import paths keep working.
+export { appOrigin } from "@/lib/app-url";
