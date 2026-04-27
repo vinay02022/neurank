@@ -48,7 +48,12 @@ type LimiterName =
   | "traffic:beacon"
   | "traffic:upload"
   | "audit:run"
-  | "audit:fix";
+  | "audit:fix"
+  | "article:generate"
+  | "article:regenerate"
+  | "article:publish"
+  | "brand-voice:train"
+  | "api:articles";
 
 const LIMITS: Record<LimiterName, { limit: number; windowSec: number }> = {
   "webhook:clerk": { limit: 120, windowSec: 60 },
@@ -67,6 +72,26 @@ const LIMITS: Record<LimiterName, { limit: number; windowSec: number }> = {
   "audit:run": { limit: 10, windowSec: 60 * 60 },
   // Auto-fix generations are one LLM call each; 60/min per workspace.
   "audit:fix": { limit: 60, windowSec: 60 },
+  // Article generation is our single most expensive job — ~30 s + 10
+  // LLM calls + optional image gen. 30/hour per workspace is plenty
+  // for legitimate content teams while absorbing a stuck UI that
+  // double-clicks "Generate". `articlesPerMonth` on the plan handles
+  // longer-horizon quota.
+  "article:generate": { limit: 30, windowSec: 60 * 60 },
+  // Per-section regenerate is cheaper (one LLM call) but sits on an
+  // interactive editor button — keep it tight so rage-clicks don't
+  // drain the wallet.
+  "article:regenerate": { limit: 60, windowSec: 60 },
+  // WordPress publish is one outbound POST per call; 30/min covers
+  // bulk publishing without letting a broken integration spam the
+  // remote site.
+  "article:publish": { limit: 30, windowSec: 60 },
+  // Brand-voice training is an LLM extraction; capped per workspace
+  // to prevent a single user from exhausting credits experimenting.
+  "brand-voice:train": { limit: 20, windowSec: 60 * 60 },
+  // Public article API — keyed by API key string so one noisy
+  // integration can't starve the rest of a workspace's keys.
+  "api:articles": { limit: 60, windowSec: 60 * 60 },
 };
 
 const redisLimiters = new Map<LimiterName, Ratelimit>();

@@ -41,15 +41,16 @@ model Workspace {
   createdAt            DateTime  @default(now())
   updatedAt            DateTime  @updatedAt
 
-  members       Membership[]
-  projects      Project[]
-  brandVoices   BrandVoice[]
-  articles      Article[]
-  chatThreads   ChatThread[]
-  apiKeys       ApiKey[]
-  llmEvents     LLMEvent[]
-  auditLogs     AuditLog[]
-  creditLedger  CreditLedger[]
+  members             Membership[]
+  projects            Project[]
+  brandVoices         BrandVoice[]
+  articles            Article[]
+  chatThreads         ChatThread[]
+  apiKeys             ApiKey[]
+  llmEvents           LLMEvent[]
+  auditLogs           AuditLog[]
+  creditLedger        CreditLedger[]
+  wordpressCredential WordPressCredential?
 }
 
 enum Plan {
@@ -374,6 +375,11 @@ model BrandVoice {
   toneTags    String[]
   sampleText  String
   profileJson Json
+  // At most one voice per workspace has `isDefault = true`; enforced
+  // in app logic (brand-voice.setDefault) rather than a partial
+  // unique index because Prisma's postgres backend doesn't model
+  // partial-unique declaratively.
+  isDefault   Boolean  @default(false)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -381,6 +387,7 @@ model BrandVoice {
   articles  Article[]
 
   @@index([workspaceId])
+  @@index([workspaceId, isDefault])
 }
 
 model Article {
@@ -396,21 +403,68 @@ model Article {
   country       String?
   articleType   String?
   keywords      String[]
+  // User-supplied reference/competitor URLs (10-step mode only). We
+  // fetch + summarise these as research grounding before outlining.
+  sourceUrls    String[]
+  // Outline CTA for 10-step. Rendered at the end of the article body.
+  ctaText       String?
+  ctaUrl        String?
   targetWords   Int?
   outline       Json?
+  // Cached research summaries (array of { url, title, summary, publishedAt? })
+  // so we don't re-crawl on regenerate-section.
+  researchJson  Json?
   contentMd     String?
   contentHtml   String?
   coverImageUrl String?
   faqJson       Json?
   creditsSpent  Int           @default(0)
   publishedUrl  String?
+  // When status = FAILED, a short user-presentable reason so the
+  // editor can surface "why" instead of a silent failure.
+  errorMessage  String?
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
 
-  workspace  Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  brandVoice BrandVoice? @relation(fields: [brandVoiceId], references: [id], onDelete: SetNull)
+  workspace  Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  brandVoice BrandVoice?    @relation(fields: [brandVoiceId], references: [id], onDelete: SetNull)
+  events     ArticleEvent[]
 
   @@index([workspaceId, status])
+  @@index([workspaceId, createdAt])
+}
+
+// One row per pipeline step (research | outline | sections | factcheck
+// | faq | cover | compile). Populated by the Inngest generator so the
+// editor can render a timeline and the audit trail survives job retries.
+model ArticleEvent {
+  id         String   @id @default(cuid())
+  articleId  String
+  step       String
+  status     String   // "started" | "ok" | "failed"
+  message    String?
+  durationMs Int?
+  createdAt  DateTime @default(now())
+
+  article Article @relation(fields: [articleId], references: [id], onDelete: Cascade)
+
+  @@index([articleId, createdAt])
+}
+
+// Per-workspace WordPress publish credentials. `encryptedPw` is an
+// AES-256-GCM ciphertext of the Application Password using the server
+// key from $ENCRYPTION_KEY; see `src/lib/crypto.ts`. We store at most
+// one credential per workspace (@unique(workspaceId)).
+model WordPressCredential {
+  id          String   @id @default(cuid())
+  workspaceId String   @unique
+  siteUrl     String
+  username    String
+  encryptedPw String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
 }
 
 enum ArticleMode {
