@@ -476,6 +476,11 @@ model Article {
   faqJson       Json?
   creditsSpent  Int           @default(0)
   publishedUrl  String?
+  // WordPress post id we created on the first successful publish.
+  // Subsequent publishes for the same article go through PUT
+  // /wp-json/wp/v2/posts/:id so we update the existing post instead
+  // of creating duplicates (idempotent re-publish).
+  wpPostId      Int?
   // When status = FAILED, a short user-presentable reason so the
   // editor can surface "why" instead of a silent failure.
   errorMessage  String?

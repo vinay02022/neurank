@@ -59,6 +59,15 @@ const FaqSchema = z.object({
 
 type Outline = z.infer<typeof OutlineSchema>;
 
+/**
+ * Hard wall-clock budget for the whole pipeline. Past this, we abort
+ * with a descriptive error so a stuck LLM call (or a Serper that
+ * never responds) doesn't keep an article in GENERATING forever.
+ * Inngest's per-step timeout is much shorter; this is the outer
+ * envelope across all stages combined.
+ */
+const PIPELINE_TIMEOUT_MS = 8 * 60 * 1000;
+
 export async function executeArticleInline(args: {
   articleId: string;
   workspaceId: string;
@@ -73,6 +82,23 @@ export async function executeArticleInline(args: {
   });
   await logEvent(articleId, "start", "ok", "inline pipeline started");
 
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutHandle = setTimeout(
+      () => reject(new Error(`Article generation exceeded the ${PIPELINE_TIMEOUT_MS / 1_000}s budget`)),
+      PIPELINE_TIMEOUT_MS,
+    );
+    timeoutHandle.unref?.();
+  });
+
+  try {
+    await Promise.race([runStages(articleId, workspaceId), timeout]);
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
+}
+
+async function runStages(articleId: string, workspaceId: string): Promise<void> {
   try {
     const article = await db.article.findFirst({
       where: { id: articleId, workspaceId },
@@ -83,6 +109,8 @@ export async function executeArticleInline(args: {
     // ---------------- research ---------------------------------------
     let research: ResearchSource[] = [];
     if (article.mode === "STEP_10" || article.sourceUrls.length > 0) {
+      const t0 = Date.now();
+      await logEvent(articleId, "research", "started", "collecting sources");
       research = await collectResearch({
         topic: article.title,
         workspaceId,
@@ -93,10 +121,12 @@ export async function executeArticleInline(args: {
         where: { id: articleId },
         data: { researchJson: research as unknown as object },
       });
-      await logEvent(articleId, "research", "ok", `${research.length} sources`);
+      await logEvent(articleId, "research", "ok", `${research.length} sources`, Date.now() - t0);
     }
 
     // ---------------- outline ----------------------------------------
+    const tOutline = Date.now();
+    await logEvent(articleId, "outline", "started", "drafting outline");
     const outlineResult = await generate({
       workspaceId,
       task: "article:outline",
@@ -126,9 +156,17 @@ export async function executeArticleInline(args: {
       where: { id: articleId },
       data: { outline: outline as unknown as object },
     });
-    await logEvent(articleId, "outline", "ok", `${outline.sections.length} sections`);
+    await logEvent(
+      articleId,
+      "outline",
+      "ok",
+      `${outline.sections.length} sections`,
+      Date.now() - tOutline,
+    );
 
     // ---------------- sections (progressive append) ------------------
+    const tSections = Date.now();
+    await logEvent(articleId, "sections", "started", `writing ${outline.sections.length} sections`);
     const parts: string[] = [`# ${outline.h1}`, ""];
     for (const sec of outline.sections) {
       const md = await generate({
@@ -158,11 +196,19 @@ export async function executeArticleInline(args: {
       });
     }
     const bodyMd = parts.join("\n");
-    await logEvent(articleId, "sections", "ok", `${outline.sections.length} sections written`);
+    await logEvent(
+      articleId,
+      "sections",
+      "ok",
+      `${outline.sections.length} sections written`,
+      Date.now() - tSections,
+    );
 
     // ---------------- factcheck (soft, only with sources) ------------
     let annotated = bodyMd;
     if (research.length > 0) {
+      const tFc = Date.now();
+      await logEvent(articleId, "factcheck", "started", "annotating citations");
       const fc = await generate({
         workspaceId,
         task: "article:factcheck",
@@ -182,10 +228,12 @@ export async function executeArticleInline(args: {
         where: { id: articleId },
         data: { contentMd: annotated },
       });
-      await logEvent(articleId, "factcheck", "ok", "inline factcheck pass");
+      await logEvent(articleId, "factcheck", "ok", "inline factcheck pass", Date.now() - tFc);
     }
 
     // ---------------- FAQ --------------------------------------------
+    const tFaq = Date.now();
+    await logEvent(articleId, "faq", "started", "generating FAQ pairs");
     const faqResult = await generate({
       workspaceId,
       task: "article:faq",
@@ -210,22 +258,33 @@ export async function executeArticleInline(args: {
       where: { id: articleId },
       data: { faqJson: faqs as unknown as object },
     });
-    await logEvent(articleId, "faq", "ok", `${faqs.length} pairs`);
+    await logEvent(articleId, "faq", "ok", `${faqs.length} pairs`, Date.now() - tFaq);
 
     // ---------------- cover (10-step only) ---------------------------
     if (article.mode === "STEP_10") {
+      const tCover = Date.now();
+      await logEvent(articleId, "cover", "started", "generating cover image");
       const coverUrl = await generateCoverImage({
         title: article.title,
         keywords: article.keywords,
         workspaceId,
+        articleId,
       });
       if (coverUrl) {
         await db.article.update({ where: { id: articleId }, data: { coverImageUrl: coverUrl } });
       }
-      await logEvent(articleId, "cover", coverUrl ? "ok" : "failed", coverUrl ?? "no image");
+      await logEvent(
+        articleId,
+        "cover",
+        coverUrl ? "ok" : "failed",
+        coverUrl ?? "no image",
+        Date.now() - tCover,
+      );
     }
 
     // ---------------- compile ----------------------------------------
+    const tCompile = Date.now();
+    await logEvent(articleId, "compile", "started", "compiling final HTML");
     const { html, wordCount } = await compileArticle({
       md: annotated,
       faqs,
@@ -240,7 +299,7 @@ export async function executeArticleInline(args: {
         status: "GENERATED",
       },
     });
-    await logEvent(articleId, "compile", "ok", `${wordCount} words`);
+    await logEvent(articleId, "compile", "ok", `${wordCount} words`, Date.now() - tCompile);
   } catch (err) {
     const reason = (err instanceof Error ? err.message : String(err))
       .replace(/\s+/g, " ")
@@ -267,10 +326,17 @@ async function logEvent(
   step: string,
   status: "started" | "ok" | "failed",
   message: string,
+  durationMs?: number,
 ): Promise<void> {
   try {
     await db.articleEvent.create({
-      data: { articleId, step, status, message: message.slice(0, 500) },
+      data: {
+        articleId,
+        step,
+        status,
+        message: message.slice(0, 500),
+        durationMs: typeof durationMs === "number" ? Math.max(0, Math.floor(durationMs)) : null,
+      },
     });
   } catch {
     // never block the pipeline on an event-log write failure

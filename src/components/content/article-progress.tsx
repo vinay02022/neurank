@@ -38,6 +38,13 @@ export function ArticleProgress({ articleId, initialEvents }: Props) {
 
   React.useEffect(() => {
     let cancelled = false;
+    let iv: ReturnType<typeof setInterval> | null = null;
+    const stop = () => {
+      if (iv) {
+        clearInterval(iv);
+        iv = null;
+      }
+    };
     const tick = async () => {
       try {
         const res = await fetch(`/api/v1/articles/${articleId}/events`, {
@@ -56,17 +63,23 @@ export function ArticleProgress({ articleId, initialEvents }: Props) {
           lastIdRef.current = latest.id;
           router.refresh();
         }
+        // Once the run leaves GENERATING we refresh once and stop
+        // polling. Continuing to tick would keep calling
+        // router.refresh() forever and waste DB reads on a finished
+        // article. The parent route re-renders the editor with the
+        // final state on the next render pass.
         if (data.status !== "GENERATING") {
+          stop();
           router.refresh();
         }
       } catch {
         // transient; next tick will retry
       }
     };
-    const iv = setInterval(tick, POLL_MS);
+    iv = setInterval(tick, POLL_MS);
     return () => {
       cancelled = true;
-      clearInterval(iv);
+      stop();
     };
   }, [articleId, router]);
 

@@ -1,5 +1,7 @@
 import { marked } from "marked";
 
+import { sanitizeArticleHtml } from "./sanitize";
+
 /**
  * Article markdown utilities.
  *
@@ -13,13 +15,16 @@ marked.setOptions({
 });
 
 /**
- * Render markdown to HTML. Output is trusted only enough to pass to
- * `publishToWordPress` (which POSTs it to a customer-owned WP site)
- * or to render inside an iframe in the editor preview. Do NOT
- * inject this string into the Neurank DOM without a sanitize pass.
+ * Render markdown to sanitized HTML. Marked v18 does not escape raw
+ * HTML, so model output containing `<script>` would otherwise reach
+ * the DOM verbatim. We always run the result through the article
+ * sanitizer — callers can render this directly via
+ * `dangerouslySetInnerHTML` or POST it to WordPress without further
+ * scrubbing.
  */
 export function mdToHtml(md: string): string {
-  return marked.parse(md, { async: false }) as string;
+  const raw = marked.parse(md, { async: false }) as string;
+  return sanitizeArticleHtml(raw);
 }
 
 /**

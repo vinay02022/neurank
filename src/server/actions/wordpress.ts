@@ -14,7 +14,7 @@ import { db } from "@/lib/db";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { decryptString, encryptString } from "@/lib/crypto";
 import { flattenZodError } from "@/lib/validation";
-import { assertSafeHttpUrl, UnsafeUrlError } from "@/lib/seo/ssrf";
+import { assertSafeHttpUrl, safeFetch, UnsafeUrlError } from "@/lib/seo/ssrf";
 
 /**
  * WordPress publish integration.
@@ -162,6 +162,8 @@ export async function publishArticleAction(
         contentMd: true,
         status: true,
         keywords: true,
+        wpPostId: true,
+        publishedUrl: true,
       },
     });
     if (!article) throw new ForbiddenError("Article not found");
@@ -171,23 +173,40 @@ export async function publishArticleAction(
     if (article.status === "GENERATING") {
       throw new ValidationError("Article is still generating — wait for it to finish.");
     }
+    // Refuse to re-create a duplicate post if we previously published
+    // somewhere we can't address. Operator should clear `publishedUrl`
+    // (or reconnect WP) to escape this branch.
+    if (article.publishedUrl && article.wpPostId == null) {
+      throw new ValidationError(
+        "This article was published before but we don't have its WordPress post id. Disconnect/reconnect WordPress to re-publish.",
+      );
+    }
 
     const appPassword = decryptString(cred.encryptedPw);
-    const endpoint = `${cred.siteUrl}/wp-json/wp/v2/posts`;
+    const isUpdate = article.wpPostId != null;
+    const endpoint = isUpdate
+      ? `${cred.siteUrl}/wp-json/wp/v2/posts/${article.wpPostId}`
+      : `${cred.siteUrl}/wp-json/wp/v2/posts`;
     await assertSafeHttpUrl(endpoint, { allowHttp: false });
 
     const auth = Buffer.from(`${cred.username}:${appPassword}`).toString("base64");
-    const res = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        authorization: `Basic ${auth}`,
-        "content-type": "application/json",
+    const res = await safeFetch(endpoint, {
+      // WP /wp-json should never redirect; following 3xx on a POST
+      // would silently downgrade to GET on most servers and lose the
+      // body — refuse instead so the operator notices.
+      maxHops: 0,
+      init: {
+        method: isUpdate ? "PUT" : "POST",
+        headers: {
+          authorization: `Basic ${auth}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          title: article.title,
+          content: article.contentHtml,
+          status: parsed.status,
+        }),
       },
-      body: JSON.stringify({
-        title: article.title,
-        content: article.contentHtml,
-        status: parsed.status,
-      }),
     });
     if (!res.ok) {
       const body = await res.text().catch(() => "");
@@ -202,7 +221,11 @@ export async function publishArticleAction(
 
     await db.article.update({
       where: { id: article.id },
-      data: { status: "PUBLISHED", publishedUrl: url },
+      data: {
+        status: "PUBLISHED",
+        publishedUrl: url,
+        wpPostId: typeof post.id === "number" ? post.id : article.wpPostId,
+      },
     });
     await db.auditLog.create({
       data: {

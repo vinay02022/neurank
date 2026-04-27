@@ -1,5 +1,6 @@
 import "server-only";
 
+import { put } from "@vercel/blob";
 import { z } from "zod";
 
 import { generate } from "@/lib/ai/router";
@@ -12,12 +13,17 @@ import { generate } from "@/lib/ai/router";
  *      the article title + keywords. Far cheaper than round-tripping
  *      DALL·E itself for "try a different angle" iteration.
  *   2. OpenAI `images.generate` produces one 1792x1024 PNG URL.
+ *   3. We download the bytes immediately and persist them to Vercel
+ *      Blob storage so we have a permanent CDN URL (DALL·E URLs
+ *      expire after ~1 hour — publishing days later would silently
+ *      ship a broken image otherwise).
  *
  * Mock / dev fallback: when OPENAI_API_KEY is missing OR the call
- * fails, we return a deterministic Unsplash-source URL so the UI
- * still renders something in local dev. The pipeline logs a `cover:
- * failed` event rather than aborting the whole article run —
- * cover is strictly nice-to-have.
+ * fails, we return a deterministic placehold.co URL so the UI still
+ * renders something. (We previously used `source.unsplash.com` but
+ * that endpoint was deprecated and now 503s.) The pipeline logs
+ * `cover:failed` rather than aborting the whole run — cover is
+ * strictly nice-to-have.
  *
  * Credit accounting: the flat 20-credit article cost already covers
  * this. The prompt-drafting step sets `skipDebit: true` and the
@@ -32,6 +38,7 @@ export interface CoverArgs {
   title: string;
   keywords: string[];
   workspaceId: string;
+  articleId: string;
 }
 
 export async function generateCoverImage(args: CoverArgs): Promise<string | null> {
@@ -62,15 +69,43 @@ export async function generateCoverImage(args: CoverArgs): Promise<string | null
     });
     if (!res.ok) return fallbackUrl(args.title);
     const json = (await res.json()) as { data?: { url?: string }[] };
-    const url = json.data?.[0]?.url;
-    // Known caveat: DALL·E URLs expire after ~1 hour. Until blob
-    // storage lands, publishing to WordPress should download the
-    // image out-of-band before pasting the final HTML.
-    return url ?? fallbackUrl(args.title);
+    const dalleUrl = json.data?.[0]?.url;
+    if (!dalleUrl) return fallbackUrl(args.title);
+    // Persist to blob immediately so we have a permanent URL. If
+    // BLOB_READ_WRITE_TOKEN isn't configured (dev env) we keep the
+    // ephemeral DALL·E URL and emit a one-time warning — the
+    // publish path will see the original URL and surface a clear
+    // error if the image expires before publish.
+    return await persistCover(dalleUrl, args.articleId).catch(() => dalleUrl);
   } catch {
     return fallbackUrl(args.title);
   }
 }
+
+async function persistCover(sourceUrl: string, articleId: string): Promise<string> {
+  if (!process.env.BLOB_READ_WRITE_TOKEN) {
+    if (!warnedAboutBlob) {
+      warnedAboutBlob = true;
+      console.warn(
+        "[cover] BLOB_READ_WRITE_TOKEN missing — cover images will use ephemeral DALL·E URLs and may break after ~1 hour.",
+      );
+    }
+    return sourceUrl;
+  }
+  const res = await fetch(sourceUrl, { signal: AbortSignal.timeout(60_000) });
+  if (!res.ok) throw new Error(`cover download failed: HTTP ${res.status}`);
+  const ct = res.headers.get("content-type") ?? "image/png";
+  const ext = ct.includes("jpeg") ? "jpg" : ct.includes("webp") ? "webp" : "png";
+  const buf = Buffer.from(await res.arrayBuffer());
+  const blob = await put(`articles/${articleId}/cover-${Date.now()}.${ext}`, buf, {
+    access: "public",
+    contentType: ct,
+    addRandomSuffix: false,
+  });
+  return blob.url;
+}
+
+let warnedAboutBlob = false;
 
 async function draftPrompt(args: CoverArgs): Promise<string | null> {
   try {
@@ -97,6 +132,9 @@ async function draftPrompt(args: CoverArgs): Promise<string | null> {
 }
 
 function fallbackUrl(title: string): string {
-  const seed = encodeURIComponent(title.slice(0, 40) || "article");
-  return `https://source.unsplash.com/1600x900/?${seed}`;
+  // placehold.co is a stable static placeholder service. We avoid
+  // source.unsplash.com (deprecated, returns 503/404) and we don't
+  // want a hot-link to an arbitrary CDN that could rotate.
+  const text = encodeURIComponent(title.slice(0, 40) || "article");
+  return `https://placehold.co/1600x900/png?text=${text}`;
 }

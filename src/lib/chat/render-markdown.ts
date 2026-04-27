@@ -1,5 +1,7 @@
 import { marked } from "marked";
 
+import { sanitizeChatHtml } from "@/lib/content/sanitize";
+
 /**
  * Markdown renderer for chat messages.
  *
@@ -7,10 +9,15 @@ import { marked } from "marked";
  * compilation). The synchronous `parse(..., { async: false })` API is
  * safe here because the input is small (<= 10k chars per chat message).
  *
- * Output is HTML — callers render via `dangerouslySetInnerHTML`. Marked
- * escapes raw HTML by default unless we set `mangle: true` / `breaks:
- * true`, so model output that includes `<script>` is rendered as text
- * rather than executed. We do NOT enable any unsafe extensions here.
+ * Output is HTML — callers render via `dangerouslySetInnerHTML`.
+ * Important: marked v18 does NOT escape raw HTML. Without the
+ * sanitize pass below, `<script>alert(1)</script>` from the model
+ * (or smuggled in via a citation URL / canvas block source the model
+ * paraphrased) would reach the DOM verbatim. We ALWAYS run the
+ * marked output through `sanitizeChatHtml`, which permits our
+ * citation `<sup>` and canvas-placeholder `<div>` markers but
+ * blocks `<script>`, `<style>`, event handlers, and unknown
+ * schemas.
  *
  * On top of vanilla GFM we add a tiny extension for citation
  * shortcodes:
@@ -67,11 +74,12 @@ export function renderChatMessage(text: string): RenderedMessage {
     //    treated as inline HTML and not escaped.
     const { withCites, citations } = replaceCitations(stripped);
 
-    const html = marked.parse(withCites, {
+    const rawHtml = marked.parse(withCites, {
       async: false,
       gfm: true,
       breaks: true,
     }) as string;
+    const html = sanitizeChatHtml(rawHtml);
     return { html, citations, canvasBlocks };
   } catch {
     const escaped = text
