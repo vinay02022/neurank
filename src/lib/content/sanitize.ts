@@ -99,7 +99,22 @@ const articleOpts: IOptions = {
   },
   allowProtocolRelative: false,
   transformTags: {
-    a: sanitizeHtml.simpleTransform("a", { rel: "noopener noreferrer" }, true),
+    // Merge `rel` tokens rather than overwriting them — `simpleTransform`
+    // with merge:true still replaces conflicting attributes, which would
+    // drop the `nofollow` we set on citation anchors in `compileArticle`.
+    a: (tagName, attribs) => {
+      const tokens = new Set(
+        String(attribs.rel ?? "")
+          .split(/\s+/)
+          .filter(Boolean),
+      );
+      tokens.add("noopener");
+      tokens.add("noreferrer");
+      return {
+        tagName: "a",
+        attribs: { ...attribs, rel: Array.from(tokens).join(" ") },
+      };
+    },
   },
   // Block by default; explicit allowlist above takes precedence.
   disallowedTagsMode: "discard",

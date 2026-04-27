@@ -21,6 +21,7 @@ import { flattenZodError } from "@/lib/validation";
 import { planQuota } from "@/config/plans";
 import { ARTICLE_CREDIT_COST } from "@/config/article";
 import { slugify } from "@/lib/content/markdown";
+import { replaceSection, splitSections } from "@/lib/article/sections";
 import type { ArticleMode } from "@prisma/client";
 
 /**
@@ -435,48 +436,9 @@ export async function regenerateSectionAction(
   }
 }
 
-function splitSections(md: string): { heading: string; body: string }[] {
-  const lines = md.split(/\n/);
-  const out: { heading: string; body: string }[] = [];
-  let current: { heading: string; body: string } | null = null;
-  for (const line of lines) {
-    const m = /^##\s+(.+?)\s*$/.exec(line);
-    if (m) {
-      if (current) out.push(current);
-      current = { heading: m[1] ?? "", body: "" };
-    } else if (current) {
-      current.body += (current.body ? "\n" : "") + line;
-    }
-  }
-  if (current) out.push(current);
-  return out;
-}
-
-function replaceSection(md: string, heading: string, replacement: string): string {
-  const esc = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  // JS regex doesn't support `\Z` for end-of-input; the previous
-  // implementation matched zero characters in some shapes. We split
-  // the document into sections on `^## `, replace the matching one
-  // verbatim, then re-join. This is also safer against headings
-  // that share a prefix (e.g. "Foo" vs "Foo Bar").
-  const re = new RegExp(`(^|\\n)##\\s+${esc}\\s*\\n`, "m");
-  const m = re.exec(md);
-  if (!m) return md;
-  const sectionStart = m.index + m[1]!.length;
-  // Find the next `^## ` after our match (or end-of-doc).
-  const tail = md.slice(sectionStart + (m[0].length - m[1]!.length));
-  const nextMatch = /\n##\s+/.exec(tail);
-  const sectionEnd = nextMatch
-    ? sectionStart + (m[0].length - m[1]!.length) + nextMatch.index
-    : md.length;
-  const trimmed = replacement.replace(/\n+$/, "");
-  return (
-    md.slice(0, sectionStart) +
-    trimmed +
-    (nextMatch ? "\n\n" : "\n") +
-    md.slice(sectionEnd).replace(/^\n+/, "")
-  );
-}
+// `splitSections` and `replaceSection` were previously inlined here,
+// but a `"use server"` module can only export server actions. They've
+// been moved to `@/lib/article/sections` (pure, unit-tested).
 
 // ---------------------------------------------------------------------------
 // deleteArticleAction

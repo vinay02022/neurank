@@ -275,6 +275,15 @@ function StepBasics({
             onChange={(e) =>
               setState({ ...state, targetWords: Number(e.target.value) || 0 })
             }
+            onBlur={(e) => {
+              // Server validates 500..5000. Clamp on blur so the user
+              // never submits a value the action will reject. We use the
+              // current state as the fallback rather than re-deriving
+              // from `mode` to keep StepBasics' prop surface small.
+              const raw = Number(e.target.value);
+              const v = Number.isFinite(raw) && raw > 0 ? raw : state.targetWords || 1000;
+              setState({ ...state, targetWords: Math.min(5000, Math.max(500, v)) });
+            }}
           />
         </div>
         <div className="space-y-1.5">

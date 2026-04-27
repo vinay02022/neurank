@@ -248,12 +248,12 @@ export async function POST(req: NextRequest) {
 
   return NextResponse.json(
     {
-      id: article.id,
+      id: articleId,
       status: "GENERATING",
       // Convenience URLs so curl-debuggers don't have to construct them.
       urls: {
-        self: `/api/v1/articles/${article.id}`,
-        events: `/api/v1/articles/${article.id}/events`,
+        self: `/api/v1/articles/${articleId}`,
+        events: `/api/v1/articles/${articleId}/events`,
       },
     },
     { status: 202 },

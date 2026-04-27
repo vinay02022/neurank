@@ -91,7 +91,11 @@ export default async function Page({ params }: Props) {
         contentMd={article.contentMd ?? ""}
         keywords={article.keywords}
         faqs={(article.faqJson as Array<{ q: string; a: string }> | null) ?? []}
-        canPublish={article.status === "GENERATED" || article.status === "PUBLISHED"}
+        canPublish={
+          (article.status === "GENERATED" || article.status === "PUBLISHED") &&
+          !article.errorMessage &&
+          Boolean(article.contentMd)
+        }
         wpConnected={wpConnected}
         isRunning={isRunning}
       />
