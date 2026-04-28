@@ -10,6 +10,7 @@ import { auth } from "@clerk/nextjs/server";
 import type { Plan, Project, Role, User, Workspace } from "@prisma/client";
 
 import { db } from "./db";
+import { provisionUserFromClerkId } from "./auth-provision";
 
 // ------------------------------------------------------------------
 // Typed errors
@@ -60,11 +61,20 @@ export const getCurrentUser = cache(async (): Promise<User> => {
   const user = await db.user.findUnique({ where: { clerkUserId: userId } });
   if (user) return user;
 
-  // Webhook may not have fired yet (race during first sign-in). Fall
-  // back to a read-through from Clerk's JWT claims — callers will
-  // then re-fetch once the webhook lands. We do NOT create the user
-  // here because creation must go through the signed webhook path.
-  throw new UnauthorizedError("User record not yet provisioned");
+  // JIT provisioning. The Clerk webhook is the *canonical* path for
+  // syncing users into Postgres, but two cases land here without it:
+  //
+  //   1. First-request race — the webhook is configured but its HTTP
+  //      delivery is still in flight when the user's first redirect
+  //      to /dashboard arrives.
+  //   2. Dev mode without a public tunnel — `CLERK_WEBHOOK_SECRET` is
+  //      empty, so the webhook handler returns 500 and never runs.
+  //
+  // We fail-open: pull the snapshot from Clerk's backend SDK (which
+  // re-validates the JWT) and create the User + default Workspace +
+  // OWNER Membership transactionally. Idempotent — concurrent calls
+  // collapse on the email/clerkUserId unique constraints.
+  return provisionUserFromClerkId(userId);
 });
 
 // ------------------------------------------------------------------
