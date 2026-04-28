@@ -1,0 +1,102 @@
+name: CI
+
+# We run on every PR and on pushes to `main`. Forks get the same gate
+# without running secrets-using workflows (Vercel deploy, Stripe smoke
+# tests live elsewhere). Cancel-in-progress prevents stale runs from
+# blocking a freshly-pushed branch.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pin a known-good Node major; Next 16 requires >= 20.
+  NODE_VERSION: "20"
+  # pnpm version is read from package.json `packageManager` if set,
+  # but we pin here as a belt-and-braces fallback.
+  PNPM_VERSION: "9"
+
+jobs:
+  verify:
+    name: Typecheck · Lint · Test · Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # Build / typecheck need a few env vars to be *defined*. None of
+    # them touch real services — Prisma's `prisma generate` reads the
+    # URL but doesn't open a connection, and Clerk only needs the key
+    # at runtime. Real secrets stay in Vercel.
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/neurank?schema=public
+      DIRECT_URL: postgresql://postgres:postgres@localhost:5432/neurank?schema=public
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+      NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: pk_test_ci_placeholder
+      CLERK_SECRET_KEY: sk_test_ci_placeholder
+      # AI provider keys are only needed at runtime; we set placeholders
+      # so server-only modules that read them at import don't bail.
+      OPENAI_API_KEY: ci-placeholder
+      ANTHROPIC_API_KEY: ci-placeholder
+      GOOGLE_GENERATIVE_AI_API_KEY: ci-placeholder
+      STRIPE_SECRET_KEY: sk_test_ci_placeholder
+      STRIPE_WEBHOOK_SECRET: whsec_ci_placeholder
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Use Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # `prisma generate` produces the typed client. Skipping it makes
+      # `tsc --noEmit` fail on every Prisma import, so we run it before
+      # any other static check.
+      - name: Generate Prisma client
+        run: pnpm prisma generate
+
+      - name: Validate Prisma schema
+        run: pnpm prisma validate
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      # `pnpm lint` is currently a placeholder — Next 16 dropped
+      # `next lint` and we haven't wired flat-config ESLint yet. Keep
+      # the step in the workflow but don't gate on it; once the new
+      # config lands we'll drop `continue-on-error`.
+      - name: Lint
+        run: pnpm lint
+        continue-on-error: true
+
+      - name: Unit tests
+        run: pnpm test
+
+      # Build last because it's the slowest step and we want fast
+      # feedback on the static checks above. Cache `.next/cache` so
+      # subsequent CI runs warm up faster.
+      - name: Restore Next build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .next/cache
+          key: ${{ runner.os }}-next-${{ hashFiles('pnpm-lock.yaml') }}-${{ hashFiles('**/*.ts', '**/*.tsx') }}
+          restore-keys: |
+            ${{ runner.os }}-next-${{ hashFiles('pnpm-lock.yaml') }}-
+
+      - name: Build
+        run: pnpm build
